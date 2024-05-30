@@ -1,0 +1,11 @@
+# Copyright (c) 2024 Cypress Semiconductor Corporation (an Infineon company) or
+# an affiliate of Cypress Semiconductor Corporation
+#
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+    Bluetooth module that uses Infineon CYW208XX HCI bluetooth interface
+
+compatible: "infineon,cyw208xx-hci"
+
+include: base.yaml

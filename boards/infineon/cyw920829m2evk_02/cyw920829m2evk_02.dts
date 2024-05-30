@@ -19,6 +19,11 @@
 		zephyr,console = &uart2;
 		zephyr,shell-uart = &uart2;
 	};
+
+	bluetooth {
+		compatible = "infineon,cyw208xx-hci";
+		status = "okay";
+	};
 };
 
 &nvic {
