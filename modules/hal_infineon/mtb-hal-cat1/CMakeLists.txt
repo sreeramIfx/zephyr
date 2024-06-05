@@ -86,7 +86,7 @@ zephyr_library_sources_ifdef(CONFIG_USE_INFINEON_TRNG    ${hal_dir}/source/cyhal
 zephyr_library_sources_ifdef(CONFIG_USE_INFINEON_UART    ${hal_dir}/source/cyhal_uart.c)
 zephyr_library_sources_ifdef(CONFIG_USE_INFINEON_WDT     ${hal_dir}/source/cyhal_wdt.c)
 
-if(CONFIG_USE_INFINEON_ADC)
+if(CONFIG_USE_INFINEON_ADC OR CONFIG_USE_INFINEON_SMIF)
   zephyr_library_sources(${hal_dir}/source/cyhal_analog_common.c)
   zephyr_library_sources(${hal_dir}/source/cyhal_dma.c)
   zephyr_library_sources(${hal_dir}/source/cyhal_dma_dmac.c)
