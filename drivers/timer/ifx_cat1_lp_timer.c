@@ -52,6 +52,7 @@ static void lptimer_interrupt_handler(void *handler_arg, cyhal_lptimer_event_t e
 	CY_UNUSED_PARAMETER(handler_arg);
 	CY_UNUSED_PARAMETER(event);
 
+	k_spinlock_key_t key = k_spin_lock(&lock);
 	/* announce the elapsed time in ms */
 	uint32_t lptimer_value = cyhal_lptimer_read(&lptimer_obj);
 	uint32_t delta_ticks =
@@ -59,11 +60,14 @@ static void lptimer_interrupt_handler(void *handler_arg, cyhal_lptimer_event_t e
 		LPTIMER_FREQ;
 	sys_clock_announce(IS_ENABLED(CONFIG_TICKLESS_KERNEL) ? delta_ticks : (delta_ticks > 0));
 	last_lptimer_value = lptimer_value;
+	k_spin_unlock(&lock, key);
 }
 
 void sys_clock_set_timeout(int32_t ticks, bool idle)
 {
 	ARG_UNUSED(idle);
+
+	k_spinlock_key_t key = k_spin_lock(&lock);
 
 	if (!IS_ENABLED(CONFIG_TICKLESS_KERNEL)) {
 		return;
@@ -73,6 +77,7 @@ void sys_clock_set_timeout(int32_t ticks, bool idle)
 		/* Disable the LPTIMER events */
 		cyhal_lptimer_enable_event(&lptimer_obj, CYHAL_LPTIMER_COMPARE_MATCH,
 					   LPTIMER_INTR_PRIORITY, false);
+		k_spin_unlock(&lock, key);
 		return;
 	}
 
@@ -92,6 +97,8 @@ void sys_clock_set_timeout(int32_t ticks, bool idle)
 
 	/* Set the delay value for the next wakeup interrupt */
 	cyhal_lptimer_set_delay(&lptimer_obj, set_ticks);
+
+	k_spin_unlock(&lock, key);
 }
 
 uint32_t sys_clock_elapsed(void)

@@ -9,7 +9,7 @@ config INFINEON_CAT1_LP_TIMER
 	bool "Infineon CAT1 Low Power Timer driver"
 	default y
 	depends on DT_HAS_INFINEON_CAT1_LP_TIMER_ENABLED
-	depends on CLOCK_CONTROL && PM
+	depends on PM
 	select USE_INFINEON_LPTIMER
 	select TICKLESS_CAPABLE
 	help
