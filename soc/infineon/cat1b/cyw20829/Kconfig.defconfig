@@ -23,9 +23,6 @@ config BUILD_OUTPUT_ADJUST_LMA
 	default "0x60000000 - $(dt_node_reg_addr_hex,$(dt_nodelabel_path,flash0))"
 
 config ROM_START_OFFSET
-	default 0x0 if BOOTLOADER_MCUBOOT
-
-config CYW20829_ROM_START_OFFSET
 	default 0x400 if BOOTLOADER_MCUBOOT
 
 # add additional die specific params
