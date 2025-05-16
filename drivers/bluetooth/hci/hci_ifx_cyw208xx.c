@@ -183,6 +183,31 @@ static int cyw208xx_bt_firmware_download(const uint8_t *firmware_image, uint32_t
 	return 0;
 }
 
+static int cybt_enable_low_power_mode(void)
+{
+#define HCI_VSC_WRITE_SLEEP_MODE        (0xFC27)
+#define HCI_VSC_WRITE_SLEEP_MODE_LENGTH (12)
+#define BT_SLEEP_MODE_ENABLE            (1)
+	struct net_buf *buf;
+	int err;
+
+	buf = bt_hci_cmd_create(HCI_VSC_WRITE_SLEEP_MODE, HCI_VSC_WRITE_SLEEP_MODE_LENGTH);
+	if (buf == NULL) {
+		LOG_ERR("Unable to allocate command buffer");
+		return -ENOMEM;
+	}
+
+	uint8_t *data = net_buf_add(buf, HCI_VSC_WRITE_SLEEP_MODE_LENGTH);
+	data[0] = BT_SLEEP_MODE_ENABLE;
+
+	err = bt_hci_cmd_send_sync(HCI_VSC_WRITE_SLEEP_MODE, buf, NULL);
+	if (err) {
+		return err;
+	}
+
+	return 0;
+}
+
 static int cyw208xx_setup(const struct device *dev, const struct bt_hci_setup_params *params)
 {
 	ARG_UNUSED(dev);
@@ -237,6 +262,14 @@ static int cyw208xx_setup(const struct device *dev, const struct bt_hci_setup_pa
 		LOG_ERR("Failed to set public address (%d)", err);
 		return err;
 	}
+
+	err = cybt_enable_low_power_mode();
+	if (err) {
+		LOG_ERR("Failed to set low power mode (%d)", err);
+		cyhal_syspm_unlock_deepsleep();
+		return err;
+	}
+
 	cyhal_syspm_unlock_deepsleep();
 
 	return 0;
