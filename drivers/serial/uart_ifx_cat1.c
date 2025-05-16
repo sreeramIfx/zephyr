@@ -209,7 +209,7 @@ static int32_t _get_hw_block_num(CySCB_Type *reg_addr)
 		}
 	}
 
-	return -1;
+	return -ENOMEM;
 }
 
 uint32_t ifx_cat1_uart_get_num_in_tx_fifo(const struct device *dev)
