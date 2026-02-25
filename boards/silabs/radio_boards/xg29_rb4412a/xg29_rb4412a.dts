@@ -6,7 +6,7 @@
 
 /dts-v1/;
 #include <silabs/xg29/efr32mg29b140f1024im40.dtsi>
-#include <dt-bindings/adc/silabs-adc.h>
+#include <zephyr/dt-bindings/adc/silabs-adc.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/dt-bindings/pwm/pwm.h>
 #include <zephyr/dt-bindings/regulator/silabs_dcdc.h>
@@ -329,7 +329,7 @@
 		};
 
 		slot0_partition: partition@c000 {
-			reg = <0x0000C000 DT_SIZE_K(472)>;
+			reg = <0x0000c000 DT_SIZE_K(472)>;
 			label = "image-0";
 		};
 
@@ -338,8 +338,8 @@
 			label = "image-1";
 		};
 
-		storage_partition: partition@F8000 {
-			reg = <0x000F8000 DT_SIZE_K(32)>;
+		storage_partition: partition@f8000 {
+			reg = <0x000f8000 DT_SIZE_K(32)>;
 			label = "storage";
 		};
 	};

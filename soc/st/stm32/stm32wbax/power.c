@@ -27,6 +27,12 @@
 
 #include <zephyr/logging/log.h>
 
+#if defined(CONFIG_PM) && (defined(CONFIG_BT) || defined(CONFIG_IEEE802154))
+#include <zephyr/pm/policy.h>
+#include "os_wrapper.h"
+#include "ll_sys.h"
+#endif
+
 LOG_MODULE_DECLARE(soc, CONFIG_SOC_LOG_LEVEL);
 
 
@@ -238,6 +244,26 @@ void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id)
 	irq_unlock(0);
 }
 
+#ifdef CONFIG_PM_CUSTOM_TICKS_HOOK
+int64_t pm_policy_next_custom_ticks(void)
+{
+	int64_t ret;
+
+	if (LL_PWR_GetRadioMode() == LL_PWR_RADIO_ACTIVE_MODE) {
+		ret = 0; /* Radio is active - inhibit sleep */
+	} else {
+		uint64_t next_radio_evt_us = os_timer_get_earliest_time();
+
+		if (next_radio_evt_us == LL_DP_SLP_NO_WAKEUP) {
+			ret = -1LL; /* No radio event pending */
+		} else {
+			ret = k_us_to_ticks_floor64(next_radio_evt_us);
+		}
+	}
+	return ret;
+}
+#endif /* CONFIG_PM_CUSTOM_TICKS_HOOK */
+
 /* Initialize STM32 Power */
 void stm32_power_init(void)
 {
@@ -245,11 +271,8 @@ void stm32_power_init(void)
 	LL_AHB4_GRP1_EnableClock(LL_AHB4_GRP1_PERIPH_PWR);
 
 #ifdef CONFIG_DEBUG
-	LL_DBGMCU_EnableDBGStandbyMode();
 	LL_DBGMCU_APB7_GRP1_FreezePeriph(LL_DBGMCU_APB7_GRP1_RTC_STOP);
 	LL_DBGMCU_APB7_GRP1_FreezePeriph(LL_DBGMCU_APB7_GRP1_LPTIM1_STOP);
-#else
-	LL_DBGMCU_DisableDBGStandbyMode();
 #endif
 
 	/* Enable SRAM full retention */

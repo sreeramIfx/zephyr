@@ -6,7 +6,7 @@
 
 #include <arm/armv8-m.dtsi>
 #include <nordic/nrf_common.dtsi>
-#include <zephyr/dt-bindings/adc/nrf-saadc-v2.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
 
 / {
 	cpus {
@@ -41,6 +41,7 @@
 		peripheral@50000000 {
 			#address-cells = <1>;
 			#size-cells = <1>;
+			reg = <0x50000000 0x10000000>;
 			ranges = <0x0 0x50000000 0x10000000>;
 
 			/* Common nRF91 peripherals description. */

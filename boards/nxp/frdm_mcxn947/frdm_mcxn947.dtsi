@@ -21,6 +21,10 @@
 		mcuboot-button0 = &user_button_2;
 	};
 
+	chosen {
+		zephyr,edac = &erm0;
+	};
+
 	leds {
 		compatible = "gpio-leds";
 
@@ -130,6 +134,38 @@
 	};
 };
 
+&eim0 {
+	status = "okay";
+};
+
+&eim0_channel0 {
+	status = "okay";
+};
+
+&eim0_channel2 {
+	status = "okay";
+};
+
+&eim0_channel3 {
+	status = "okay";
+};
+
+&eim0_channel4 {
+	status = "okay";
+};
+
+&eim0_channel5 {
+	status = "okay";
+};
+
+&eim0_channel6 {
+	status = "okay";
+};
+
+&erm0 {
+	status = "okay";
+};
+
 &flexcomm1_lpspi1 {
 	pinctrl-0 = <&pinmux_flexcomm1_lpspi>;
 	pinctrl-names = "default";
@@ -227,6 +263,7 @@ arduino_serial: &flexcomm2_lpuart2 {};
 		compatible = "fixed-partitions";
 		#address-cells = <1>;
 		#size-cells = <1>;
+		ranges;
 
 		/*
 		 * Partition sizes must be aligned
@@ -242,9 +279,9 @@ arduino_serial: &flexcomm2_lpuart2 {};
 			reg = <0x00014000 DT_SIZE_K(984)>;
 		};
 
-		slot1_partition: partition@10A000 {
+		slot1_partition: partition@10a000 {
 			label = "image-1";
-			reg = <0x0010A000 DT_SIZE_K(984)>;
+			reg = <0x0010a000 DT_SIZE_K(984)>;
 		};
 		/* storage_partition is placed in WINBOND flash memory*/
 	};
@@ -345,11 +382,6 @@ zephyr_mipi_dbi_parallel: &flexio0_lcd {
 	cs-gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
 	rs-gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;
 	pinctrl-0 = <&pinmux_flexio_lcd>;
-	pinctrl-names = "default";
-};
-
-&lpcmp0 {
-	pinctrl-0 = <&pinmux_lpcmp0>;
 	pinctrl-names = "default";
 };
 

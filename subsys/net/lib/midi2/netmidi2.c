@@ -69,7 +69,7 @@ NET_BUF_POOL_DEFINE(netmidi2_pool, 2 + CONFIG_NETMIDI2_HOST_MAX_CLIENTS,
 	do { \
 		const struct net_sockaddr *addr = net_sad(&(_s)->addr); \
 		const struct net_sockaddr_in6 *addr6 = net_sin6(addr); \
-		char __pn[INET6_ADDRSTRLEN]; \
+		char __pn[NET_INET6_ADDRSTRLEN]; \
 		net_addr_ntop(addr->sa_family, &addr6->sin6_addr, __pn, sizeof(__pn)); \
 		NET_##_lvl("%s:%d " _fmt, __pn, addr6->sin6_port, ##__VA_ARGS__); \
 	} while (0)
@@ -104,14 +104,19 @@ static bool netmidi2_auth_session(const struct netmidi2_session *sess,
 	const uint8_t *auth_digest = buf->data;
 	const struct netmidi2_user *user;
 	uint8_t output[NETMIDI2_DIGEST_SIZE];
-	struct hash_ctx ctx = {.flags = crypto_query_hwcaps(hasher)};
-	struct hash_pkt hash = {.out_buf = output, .ctx = &ctx};
+	struct hash_ctx ctx = {0};
+	struct hash_pkt hash = {0};
 	int ret;
 
 	if (hasher == NULL) {
 		SESS_LOG_ERR(sess, "mbedtls crypto pseudo-device unavailable");
 		return false;
 	}
+
+	/* Assign values after the NULL check */
+	ctx.flags = crypto_query_hwcaps(hasher);
+	hash.out_buf = output;
+	hash.ctx = &ctx;
 
 	if (buf->len < NETMIDI2_DIGEST_SIZE || payload_len < NETMIDI2_DIGEST_SIZE) {
 		SESS_LOG_ERR(sess, "Incomplete authentication digest");

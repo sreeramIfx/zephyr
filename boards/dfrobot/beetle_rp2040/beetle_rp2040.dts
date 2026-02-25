@@ -9,7 +9,7 @@
 /dts-v1/;
 
 #include <raspberrypi/rpi_pico/rp2040.dtsi>
-#include <dt-bindings/pinctrl/rpi-pico-rp2040-pinctrl.h>
+#include <zephyr/dt-bindings/pinctrl/rpi-pico-rp2040-pinctrl.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/dt-bindings/led/led.h>
 #include "beetle_rp2040-pinctrl.dtsi"
@@ -48,11 +48,13 @@
 
 &flash0 {
 	reg = <0x10000000 DT_SIZE_M(2)>;
+	ranges = <0x0 0x10000000 DT_SIZE_M(2)>;
 
 	partitions {
 		compatible = "fixed-partitions";
 		#address-cells = <1>;
 		#size-cells = <1>;
+		ranges;
 
 		/* Reserved memory for the second stage bootloader */
 		second_stage_bootloader: partition@0 {

@@ -25,6 +25,7 @@ LOG_MODULE_REGISTER(dma_stm32, CONFIG_DMA_LOG_LEVEL);
 #define DT_DRV_COMPAT st_stm32u5_dma
 
 #define STM32U5_DMA_LINKED_LIST_NODE_SIZE (2)
+#define STM32U5_DMA_MAX_BURST_LENGTH      (64) /* Maximum number of beats in a burst */
 
 static const uint32_t table_src_size[] = {
 	LL_DMA_SRC_DATAWIDTH_BYTE,
@@ -252,6 +253,7 @@ static void dma_stm32_irq_handler(const struct device *dev, uint32_t id)
 	DMA_TypeDef *dma = (DMA_TypeDef *)(config->base);
 	struct dma_stm32_stream *stream;
 	uint32_t callback_arg;
+	int status;
 
 	__ASSERT_NO_MSG(id < config->max_streams);
 
@@ -273,7 +275,7 @@ static void dma_stm32_irq_handler(const struct device *dev, uint32_t id)
 		if (!stream->hal_override) {
 			dma_stm32_clear_ht(dma, id);
 		}
-		stream->dma_callback(dev, stream->user_data, callback_arg, DMA_STATUS_BLOCK);
+		status = DMA_STATUS_BLOCK;
 	} else if (stm32_dma_is_tc_irq_active(dma, id)) {
 		/* Assuming not cyclic transfer */
 		if (stream->cyclic == false) {
@@ -283,14 +285,17 @@ static void dma_stm32_irq_handler(const struct device *dev, uint32_t id)
 		if (!stream->hal_override) {
 			dma_stm32_clear_tc(dma, id);
 		}
-		stream->dma_callback(dev, stream->user_data, callback_arg, DMA_STATUS_COMPLETE);
+		status = DMA_STATUS_COMPLETE;
 	} else {
 		LOG_ERR("Transfer Error.");
 		stream->busy = false;
 		dma_stm32_dump_stream_irq(dev, id);
 		dma_stm32_clear_stream_irq(dev, id);
-		stream->dma_callback(dev, stream->user_data,
-				     callback_arg, -EIO);
+		status = -EIO;
+	}
+
+	if (stream->dma_callback != NULL) {
+		stream->dma_callback(dev, stream->user_data, callback_arg, status);
 	}
 }
 
@@ -403,6 +408,44 @@ static int dma_stm32_configure(const struct device *dev,
 		LOG_ERR("source and dest unit size error, %d",
 			config->source_data_size);
 		return -EINVAL;
+	}
+
+	if ((config->source_burst_length % config->source_data_size) != 0) {
+		LOG_ERR("Source burst length %d is not aligned to source data size %d",
+			config->source_burst_length, config->source_data_size);
+		return -EINVAL;
+	}
+
+	if ((config->dest_burst_length % config->dest_data_size) != 0) {
+		LOG_ERR("Destination burst length %d is not aligned to destination data size %d",
+			config->dest_burst_length, config->dest_data_size);
+		return -EINVAL;
+	}
+
+	uint32_t burst_beats = config->source_burst_length / config->source_data_size;
+
+	if (burst_beats > STM32U5_DMA_MAX_BURST_LENGTH) {
+		LOG_ERR("Source burst length %d is invalid", config->source_burst_length);
+		return -EINVAL;
+	} else if (burst_beats > 0) {
+		LL_DMA_SetSrcBurstLength(dma, dma_stm32_id_to_stream(id), burst_beats);
+	} else {
+		/* Default HW behavior (upon reset) is a single beat burst */
+		LOG_WRN("Accepting source burst length 0 for backwards compatibility");
+		LL_DMA_SetSrcBurstLength(dma, dma_stm32_id_to_stream(id), 1U);
+	}
+
+	burst_beats = config->dest_burst_length / config->dest_data_size;
+
+	if (burst_beats > STM32U5_DMA_MAX_BURST_LENGTH) {
+		LOG_ERR("Destination burst length %d is invalid", config->dest_burst_length);
+		return -EINVAL;
+	} else if (burst_beats > 0) {
+		LL_DMA_SetDestBurstLength(dma, dma_stm32_id_to_stream(id), burst_beats);
+	} else {
+		/* Default HW behavior (upon reset) is a single beat burst */
+		LOG_WRN("Accepting destination burst length 0 for backwards compatibility");
+		LL_DMA_SetDestBurstLength(dma, dma_stm32_id_to_stream(id), 1U);
 	}
 
 	stream->busy		= true;
@@ -606,6 +649,7 @@ static int dma_stm32_suspend(const struct device *dev, uint32_t id)
 {
 	const struct dma_stm32_config *config = dev->config;
 	DMA_TypeDef *dma = (DMA_TypeDef *)(config->base);
+	const struct dma_stm32_stream *stream = &config->streams[id];
 
 	if (id >= config->max_streams) {
 		return -EINVAL;
@@ -616,7 +660,8 @@ static int dma_stm32_suspend(const struct device *dev, uint32_t id)
 	/* It's not enough to wait for the SUSPF bit with LL_DMA_IsActiveFlag_SUSP */
 	do {
 		k_busy_wait(800); /* A delay is needed (800us is valid) */
-	} while (LL_DMA_IsActiveFlag_SUSP(dma, dma_stm32_id_to_stream(id)) != 1);
+	} while (LL_DMA_IsActiveFlag_SUSP(dma, dma_stm32_id_to_stream(id)) != 1 &&
+			stream->busy == true);
 
 	/* Do not Reset the channel to allow resuming later */
 	return 0;

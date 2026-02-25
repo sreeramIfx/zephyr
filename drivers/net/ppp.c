@@ -94,7 +94,6 @@ struct ppp_driver_context {
 #endif
 
 	uint8_t mac_addr[6];
-	struct net_linkaddr ll_addr;
 
 	/* Flag that tells whether this instance is initialized or not */
 	atomic_t modem_init_done;
@@ -827,9 +826,9 @@ static int ppp_send(const struct device *dev, struct net_pkt *pkt)
 	 */
 	if (!net_pkt_is_ppp(pkt)) {
 		if (net_pkt_family(pkt) == NET_AF_INET) {
-			protocol = htons(PPP_IP);
+			protocol = net_htons(PPP_IP);
 		} else if (net_pkt_family(pkt) == NET_AF_INET6) {
-			protocol = htons(PPP_IPV6);
+			protocol = net_htons(PPP_IPV6);
 		}  else {
 			return -EPROTONOSUPPORT;
 		}
@@ -846,12 +845,12 @@ static int ppp_send(const struct device *dev, struct net_pkt *pkt)
 				  sizeof(sync_addr_ctrl), send_off);
 
 	if (protocol > 0) {
-		escaped = htons(ppp_escape_byte(protocol, &offset));
+		escaped = net_htons(ppp_escape_byte(protocol, &offset));
 		send_off = ppp_send_bytes(ppp, (uint8_t *)&escaped + offset,
 					  offset ? 1 : 2,
 					  send_off);
 
-		escaped = htons(ppp_escape_byte(protocol >> 8, &offset));
+		escaped = net_htons(ppp_escape_byte(protocol >> 8, &offset));
 		send_off = ppp_send_bytes(ppp, (uint8_t *)&escaped + offset,
 					  offset ? 1 : 2,
 					  send_off);
@@ -868,7 +867,7 @@ static int ppp_send(const struct device *dev, struct net_pkt *pkt)
 	while (buf) {
 		for (i = 0; i < buf->len; i++) {
 			/* Escape illegal bytes */
-			escaped = htons(ppp_escape_byte(buf->data[i], &offset));
+			escaped = net_htons(ppp_escape_byte(buf->data[i], &offset));
 			send_off = ppp_send_bytes(ppp,
 						  (uint8_t *)&escaped + offset,
 						  offset ? 1 : 2,
@@ -878,12 +877,12 @@ static int ppp_send(const struct device *dev, struct net_pkt *pkt)
 		buf = buf->frags;
 	}
 
-	escaped = htons(ppp_escape_byte(fcs, &offset));
+	escaped = net_htons(ppp_escape_byte(fcs, &offset));
 	send_off = ppp_send_bytes(ppp, (uint8_t *)&escaped + offset,
 				  offset ? 1 : 2,
 				  send_off);
 
-	escaped = htons(ppp_escape_byte(fcs >> 8, &offset));
+	escaped = net_htons(ppp_escape_byte(fcs >> 8, &offset));
 	send_off = ppp_send_bytes(ppp, (uint8_t *)&escaped + offset,
 				  offset ? 1 : 2,
 				  send_off);
@@ -1005,10 +1004,8 @@ use_random_mac:
 	}
 
 	/* The MAC address is not really used, but the network interface expects to find one. */
-	(void)net_linkaddr_set(&ppp->ll_addr, ppp->mac_addr, sizeof(ppp->mac_addr));
 
-	net_if_set_link_addr(iface, ppp->ll_addr.addr, ppp->ll_addr.len,
-			     NET_LINK_ETHERNET);
+	net_if_set_link_addr(iface, ppp->mac_addr, sizeof(ppp->mac_addr), NET_LINK_ETHERNET);
 
 	if (IS_ENABLED(CONFIG_NET_PPP_CAPTURE)) {
 		static bool capture_setup_done;

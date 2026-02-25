@@ -17,6 +17,7 @@
 #include <zephyr/modem/backend/uart.h>
 #include <zephyr/net/ppp.h>
 #include <zephyr/pm/device.h>
+#include <zephyr/pm/device_runtime.h>
 #include <zephyr/sys/atomic.h>
 
 #include <zephyr/logging/log.h>
@@ -39,6 +40,8 @@ LOG_MODULE_REGISTER(modem_cellular, CONFIG_MODEM_LOG_LEVEL);
 #define MODEM_CELLULAR_RESERVED_DLCIS        (2)
 #define MODEM_CELLULAR_MAX_APN_CMDS          (2)
 #define MODEM_CELLULAR_APN_BUF_SIZE          (64)
+
+#define MODEM_CELLULAR_MAX_SCRIPT_FAILURES   (3)
 
 /* Magic constants */
 #define CSQ_RSSI_UNKNOWN		     (99)
@@ -95,6 +98,7 @@ enum modem_cellular_event {
 	MODEM_CELLULAR_EVENT_PPP_DEAD,
 	MODEM_CELLULAR_EVENT_MODEM_READY,
 	MODEM_CELLULAR_EVENT_APN_SET,
+	MODEM_CELLULAR_EVENT_RING,
 };
 
 struct modem_cellular_event_cb {
@@ -132,6 +136,7 @@ struct modem_cellular_data {
 	uint8_t *chat_delimiter;
 	uint8_t *chat_filter;
 	uint8_t *chat_argv[32];
+	uint8_t script_failure_counter;
 
 	/* Status */
 	enum cellular_registration_status registration_status_gsm;
@@ -166,11 +171,13 @@ struct modem_cellular_data {
 	/* Event dispatcher */
 	struct k_work event_dispatch_work;
 	uint8_t event_buf[8];
-	struct ring_buf event_rb;
-	struct k_mutex event_rb_lock;
+	struct k_pipe event_pipe;
 
 	struct k_mutex api_lock;
 	struct modem_cellular_event_cb cb;
+
+	/* Ring interrupt */
+	struct gpio_callback ring_gpio_cb;
 };
 
 struct modem_cellular_user_pipe {
@@ -187,12 +194,21 @@ struct modem_cellular_config {
 	struct gpio_dt_spec power_gpio;
 	struct gpio_dt_spec reset_gpio;
 	struct gpio_dt_spec wake_gpio;
+	struct gpio_dt_spec ring_gpio;
 	struct gpio_dt_spec dtr_gpio;
 	uint16_t power_pulse_duration_ms;
 	uint16_t reset_pulse_duration_ms;
 	uint16_t startup_time_ms;
 	uint16_t shutdown_time_ms;
 	bool autostarts;
+	bool hold_reset_on_suspend;
+	bool reset_on_resume;
+	bool reset_on_recovery;
+	bool cmux_enable_runtime_power_save;
+	bool cmux_close_pipe_on_power_save;
+	bool use_default_pdp_context;
+	bool use_default_apn;
+	k_timeout_t cmux_idle_timeout;
 	const struct modem_chat_script *init_chat_script;
 	const struct modem_chat_script *dial_chat_script;
 	const struct modem_chat_script *periodic_chat_script;
@@ -285,6 +301,8 @@ static const char *modem_cellular_event_str(enum modem_cellular_event event)
 		return "modem ready";
 	case MODEM_CELLULAR_EVENT_APN_SET:
 		return "apn set";
+	case MODEM_CELLULAR_EVENT_RING:
+		return "RING";
 	}
 
 	return "";
@@ -343,9 +361,15 @@ static bool modem_cellular_gpio_is_enabled(const struct gpio_dt_spec *gpio)
 	return gpio->port != NULL;
 }
 
-static bool modem_cellular_has_apn(const struct modem_cellular_data *data)
+static bool modem_cellular_needs_apn(const struct modem_cellular_data *data)
 {
-	return data->apn[0] != '\0';
+	const struct modem_cellular_config *config =
+		(const struct modem_cellular_config *)data->dev->config;
+
+	if (config->use_default_apn) {
+		return false;
+	}
+	return data->apn[0] == '\0';
 }
 
 static void modem_cellular_notify_user_pipes_connected(struct modem_cellular_data *data)
@@ -607,6 +631,59 @@ static void modem_cellular_chat_on_cxreg(struct modem_chat *chat, char **argv, u
 	modem_cellular_emit_reg_state(data, registration_status);
 }
 
+static void modem_cellular_chat_on_cgev(struct modem_chat *chat, char **argv, uint16_t argc,
+					void *user_data)
+{
+	struct modem_cellular_data *data = (struct modem_cellular_data *)user_data;
+	bool connected;
+
+	if (strcmp(argv[0], "+CGEV: ") != 0) {
+		return;
+	}
+	/* See 3GPP TS 27.007 for +CGEV syntax
+	 *
+	 * Any of the following means PDN connected:
+	 * +CGEV: NW PDN ACT <cid>
+	 * +CGEV: ME PDN ACT <cid>[,<reason>[,<cid_other>]]
+	 * +CGEV: NW ACT <p_cid>, <cid>, <event_type>
+	 * +CGEV: ME ACT <p_cid>, <cid>, <event_type>
+	 *
+	 * Any of the following means PDN disconnected:
+	 * +CGEV: NW DETACH
+	 * +CGEV: ME DETACH
+	 * +CGEV: NW DEACT <PDP_type>, <PDP_addr>, [<cid>]
+	 * +CGEV: ME DEACT <PDP_type>, <PDP_addr>, [<cid>]
+	 * +CGEV: NW PDN DEACT <cid>
+	 * +CGEV: ME PDN DEACT <cid>
+	 * +CGEV: NW DEACT <p_cid>, <cid>, <event_type>
+	 * +CGEV: ME DEACT <p_cid>, <cid>, <event_type>
+	 */
+
+	if (strstr(argv[0], " ACT")) {
+		connected = true;
+	} else if ((strstr(argv[0], "DETACH")) ||
+		   (strstr(argv[0], "DEACT"))) {
+		connected = false;
+	} else {
+		return;
+	}
+
+	/* Only notify the event if the registration status does not
+	 * match what our state machine expects.
+	 * For example, we might stay registered while losing the PDN connection, and it
+	 * might be resumed later without deregistering first.
+	 */
+	if (modem_cellular_is_registered(data)) {
+		if (!connected) {
+			modem_cellular_delegate_event(data, MODEM_CELLULAR_EVENT_DEREGISTERED);
+		}
+	} else {
+		if (connected) {
+			modem_cellular_delegate_event(data, MODEM_CELLULAR_EVENT_REGISTERED);
+		}
+	}
+}
+
 MODEM_CHAT_MATCH_DEFINE(ok_match, "OK", "", NULL);
 MODEM_CHAT_MATCHES_DEFINE(allow_match,
 			  MODEM_CHAT_MATCH("OK", "", NULL),
@@ -627,6 +704,7 @@ MODEM_CHAT_MATCHES_DEFINE(unsol_matches,
 			  MODEM_CHAT_MATCH("+CREG: ", ",", modem_cellular_chat_on_cxreg),
 			  MODEM_CHAT_MATCH("+CEREG: ", ",", modem_cellular_chat_on_cxreg),
 			  MODEM_CHAT_MATCH("+CGREG: ", ",", modem_cellular_chat_on_cxreg),
+			  MODEM_CHAT_MATCH("+CGEV: ", ",", modem_cellular_chat_on_cgev),
 			  MODEM_CHAT_MATCH("APP RDY", "", modem_cellular_chat_on_modem_ready));
 
 MODEM_CHAT_MATCHES_DEFINE(abort_matches, MODEM_CHAT_MATCH("ERROR", "", NULL));
@@ -643,6 +721,10 @@ MODEM_CHAT_MATCHES_DEFINE(dial_abort_matches,
 	DT_HAS_COMPAT_STATUS_OKAY(quectel_bg95) || DT_HAS_COMPAT_STATUS_OKAY(quectel_bg96) || \
 	DT_HAS_COMPAT_STATUS_OKAY(simcom_a76xx)
 MODEM_CHAT_MATCH_DEFINE(connect_match, "CONNECT", "", NULL);
+#endif
+
+#if DT_HAS_COMPAT_STATUS_OKAY(quectel_bg95) || DT_HAS_COMPAT_STATUS_OKAY(quectel_bg96)
+MODEM_CHAT_MATCH_DEFINE(powerdown_match, "POWERED DOWN", "", NULL);
 #endif
 
 
@@ -672,14 +754,20 @@ static int append_apn_cmd(struct modem_cellular_data *data, uint8_t *steps, cons
 
 static void modem_cellular_build_apn_script(struct modem_cellular_data *data)
 {
+	const struct modem_cellular_config *config =
+		(const struct modem_cellular_config *)data->dev->config;
 	uint8_t steps = 0;
+	const char *apn_value = data->apn;
 
-	/* Mandatory PDP context */
-	append_apn_cmd(data, &steps, "AT+CGDCONT=1,\"IP\",\"%s\"", data->apn);
+	if (config->use_default_apn) {
+		/* Omit the APN name AT+CGDCONT=1,"IP","" */
+		apn_value = "";
+	}
+	append_apn_cmd(data, &steps, "AT+CGDCONT=1,\"IP\",\"%s\"", apn_value);
 
 	/* Vendor‑specific extras */
 #if DT_HAS_COMPAT_STATUS_OKAY(swir_hl7800)
-	append_apn_cmd(data, &steps, "AT+KCNXCFG=1,\"GPRS\",\"%s\",,,\"IPV4\"", data->apn);
+	append_apn_cmd(data, &steps, "AT+KCNXCFG=1,\"GPRS\",\"%s\",,,\"IPV4\"", apn_value);
 #endif
 
 	/* Glue the array into the script object */
@@ -722,26 +810,18 @@ static void modem_cellular_event_dispatch_handler(struct k_work *item)
 	struct modem_cellular_data *data =
 		CONTAINER_OF(item, struct modem_cellular_data, event_dispatch_work);
 
-	uint8_t events[sizeof(data->event_buf)];
-	uint8_t events_cnt;
+	enum modem_cellular_event event;
+	const size_t len = sizeof(event);
 
-	k_mutex_lock(&data->event_rb_lock, K_FOREVER);
-
-	events_cnt = (uint8_t)ring_buf_get(&data->event_rb, events, sizeof(data->event_buf));
-
-	k_mutex_unlock(&data->event_rb_lock);
-
-	for (uint8_t i = 0; i < events_cnt; i++) {
-		modem_cellular_event_handler(data, (enum modem_cellular_event)events[i]);
+	while (k_pipe_read(&data->event_pipe, (uint8_t *)&event, len, K_NO_WAIT) == len) {
+		modem_cellular_event_handler(data, (enum modem_cellular_event)event);
 	}
 }
 
 static void modem_cellular_delegate_event(struct modem_cellular_data *data,
 					  enum modem_cellular_event evt)
 {
-	k_mutex_lock(&data->event_rb_lock, K_FOREVER);
-	ring_buf_put(&data->event_rb, (uint8_t *)&evt, 1);
-	k_mutex_unlock(&data->event_rb_lock);
+	k_pipe_write(&data->event_pipe, (const uint8_t *)&evt, sizeof(evt), K_NO_WAIT);
 	k_work_submit(&data->event_dispatch_work);
 }
 
@@ -768,7 +848,7 @@ static int modem_cellular_on_idle_state_enter(struct modem_cellular_data *data)
 		gpio_pin_set_dt(&config->wake_gpio, 0);
 	}
 
-	if (modem_cellular_gpio_is_enabled(&config->reset_gpio)) {
+	if (modem_cellular_gpio_is_enabled(&config->reset_gpio) && config->hold_reset_on_suspend) {
 		gpio_pin_set_dt(&config->reset_gpio, 1);
 	}
 
@@ -794,7 +874,8 @@ static void modem_cellular_idle_event_handler(struct modem_cellular_data *data,
 			break;
 		}
 
-		if (modem_cellular_gpio_is_enabled(&config->reset_gpio)) {
+		if (modem_cellular_gpio_is_enabled(&config->reset_gpio) &&
+		    config->reset_on_resume) {
 			modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_RESET_PULSE);
 			break;
 		}
@@ -827,7 +908,7 @@ static int modem_cellular_on_idle_state_leave(struct modem_cellular_data *data)
 
 	k_sem_take(&data->suspended_sem, K_NO_WAIT);
 
-	if (modem_cellular_gpio_is_enabled(&config->reset_gpio)) {
+	if (modem_cellular_gpio_is_enabled(&config->reset_gpio) && config->hold_reset_on_suspend) {
 		gpio_pin_set_dt(&config->reset_gpio, 0);
 	}
 
@@ -1130,7 +1211,8 @@ static void modem_cellular_run_init_script_event_handler(struct modem_cellular_d
 		break;
 
 	case MODEM_CELLULAR_EVENT_SCRIPT_FAILED:
-		if (modem_cellular_gpio_is_enabled(&config->reset_gpio)) {
+		if (modem_cellular_gpio_is_enabled(&config->reset_gpio) &&
+		    config->reset_on_recovery) {
 			modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_RESET_PULSE);
 			break;
 		}
@@ -1224,10 +1306,16 @@ static int modem_cellular_on_open_dlci2_state_enter(struct modem_cellular_data *
 static void modem_cellular_open_dlci2_event_handler(struct modem_cellular_data *data,
 						    enum modem_cellular_event evt)
 {
+	const struct modem_cellular_config *config =
+		(const struct modem_cellular_config *)data->dev->config;
+
 	switch (evt) {
 	case MODEM_CELLULAR_EVENT_DLCI2_OPENED:
 		data->cmd_pipe = data->dlci2_pipe;
-		if (modem_cellular_has_apn(data)) {
+
+		if (config->use_default_pdp_context) {
+			modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_RUN_DIAL_SCRIPT);
+		} else if (!modem_cellular_needs_apn(data)) {
 			modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_RUN_APN_SCRIPT);
 		} else {
 			modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_WAIT_FOR_APN);
@@ -1266,6 +1354,26 @@ static void modem_cellular_wait_for_apn_event_handler(struct modem_cellular_data
 	}
 }
 
+static void modem_cellular_script_failed(struct modem_cellular_data *data)
+{
+	data->script_failure_counter++;
+}
+
+static void modem_cellular_script_success(struct modem_cellular_data *data)
+{
+	data->script_failure_counter = 0;
+}
+
+static bool modem_cellular_is_script_retry_exceeded(struct modem_cellular_data *data)
+{
+	if (data->script_failure_counter >= MODEM_CELLULAR_MAX_SCRIPT_FAILURES) {
+		data->script_failure_counter = 0;
+		return true;
+	}
+	return false;
+}
+
+
 static int modem_cellular_on_run_apn_script_state_enter(struct modem_cellular_data *data)
 {
 	/* Allow modem time to enter command mode before running apn script */
@@ -1283,10 +1391,16 @@ static void modem_cellular_run_apn_script_event_handler(struct modem_cellular_da
 		modem_chat_run_script_async(&data->chat, &data->apn_script);
 		break;
 	case MODEM_CELLULAR_EVENT_SCRIPT_SUCCESS:
+		modem_cellular_script_success(data);
 		modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_RUN_DIAL_SCRIPT);
 		break;
 	case MODEM_CELLULAR_EVENT_SCRIPT_FAILED:
-		modem_cellular_start_timer(data, MODEM_CELLULAR_PERIODIC_SCRIPT_TIMEOUT);
+		modem_cellular_script_failed(data);
+		if (modem_cellular_is_script_retry_exceeded(data)) {
+			modem_cellular_delegate_event(data, MODEM_CELLULAR_EVENT_SUSPEND);
+		} else {
+			modem_cellular_start_timer(data, MODEM_CELLULAR_PERIODIC_SCRIPT_TIMEOUT);
+		}
 		break;
 	case MODEM_CELLULAR_EVENT_SUSPEND:
 		modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_INIT_POWER_OFF);
@@ -1314,16 +1428,25 @@ static void modem_cellular_run_dial_script_event_handler(struct modem_cellular_d
 		modem_chat_run_script_async(&data->chat, config->dial_chat_script);
 		break;
 	case MODEM_CELLULAR_EVENT_SCRIPT_FAILED:
-		modem_cellular_start_timer(data, MODEM_CELLULAR_PERIODIC_SCRIPT_TIMEOUT);
+		modem_cellular_script_failed(data);
+		if (modem_cellular_is_script_retry_exceeded(data)) {
+			modem_cellular_delegate_event(data, MODEM_CELLULAR_EVENT_SUSPEND);
+		} else {
+			modem_cellular_start_timer(data, MODEM_CELLULAR_PERIODIC_SCRIPT_TIMEOUT);
+		}
 		break;
 	case MODEM_CELLULAR_EVENT_SCRIPT_SUCCESS:
+		modem_cellular_script_success(data);
 		modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_AWAIT_REGISTERED);
 		break;
 
 	case MODEM_CELLULAR_EVENT_SUSPEND:
 		modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_INIT_POWER_OFF);
 		break;
-
+	case MODEM_CELLULAR_EVENT_RING:
+		LOG_DBG("RING received!");
+		modem_pipe_open_async(data->uart_pipe);
+		break;
 	default:
 		break;
 	}
@@ -1353,8 +1476,18 @@ static void modem_cellular_await_registered_event_handler(struct modem_cellular_
 
 	switch (evt) {
 	case MODEM_CELLULAR_EVENT_SCRIPT_SUCCESS:
-	case MODEM_CELLULAR_EVENT_SCRIPT_FAILED:
+		modem_cellular_script_success(data);
 		modem_cellular_start_timer(data, MODEM_CELLULAR_PERIODIC_SCRIPT_TIMEOUT);
+		break;
+
+	case MODEM_CELLULAR_EVENT_SCRIPT_FAILED:
+		modem_cellular_script_failed(data);
+		if (modem_cellular_is_script_retry_exceeded(data)) {
+			modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_IDLE);
+			modem_cellular_delegate_event(data, MODEM_CELLULAR_EVENT_RESUME);
+		} else {
+			modem_cellular_start_timer(data, MODEM_CELLULAR_PERIODIC_SCRIPT_TIMEOUT);
+		}
 		break;
 
 	case MODEM_CELLULAR_EVENT_TIMEOUT:
@@ -1368,7 +1501,10 @@ static void modem_cellular_await_registered_event_handler(struct modem_cellular_
 	case MODEM_CELLULAR_EVENT_SUSPEND:
 		modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_INIT_POWER_OFF);
 		break;
-
+	case MODEM_CELLULAR_EVENT_RING:
+		LOG_DBG("RING received!");
+		modem_pipe_open_async(data->uart_pipe);
+		break;
 	default:
 		break;
 	}
@@ -1396,10 +1532,23 @@ static void modem_cellular_carrier_on_event_handler(struct modem_cellular_data *
 
 	switch (evt) {
 	case MODEM_CELLULAR_EVENT_SCRIPT_SUCCESS:
-	case MODEM_CELLULAR_EVENT_SCRIPT_FAILED:
-		result.success = evt == MODEM_CELLULAR_EVENT_SCRIPT_SUCCESS;
-
+		modem_cellular_script_success(data);
 		modem_cellular_start_timer(data, MODEM_CELLULAR_PERIODIC_SCRIPT_TIMEOUT);
+		result.success = true;
+		modem_cellular_emit_event(data, CELLULAR_EVENT_MODEM_COMMS_CHECK_RESULT, &result);
+		break;
+
+	case MODEM_CELLULAR_EVENT_SCRIPT_FAILED:
+		modem_cellular_script_failed(data);
+		if (modem_cellular_is_script_retry_exceeded(data)) {
+			net_if_carrier_off(modem_ppp_get_iface(data->ppp));
+			modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_IDLE);
+			modem_cellular_delegate_event(data, MODEM_CELLULAR_EVENT_RESUME);
+			LOG_WRN("Maximum script failures reached, restarting modem");
+		} else {
+			modem_cellular_start_timer(data, MODEM_CELLULAR_PERIODIC_SCRIPT_TIMEOUT);
+		}
+		result.success = false;
 		modem_cellular_emit_event(data, CELLULAR_EVENT_MODEM_COMMS_CHECK_RESULT, &result);
 		break;
 
@@ -1410,6 +1559,12 @@ static void modem_cellular_carrier_on_event_handler(struct modem_cellular_data *
 	case MODEM_CELLULAR_EVENT_DEREGISTERED:
 		modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_DORMANT);
 		break;
+	case MODEM_CELLULAR_EVENT_PPP_DEAD:
+		if (net_if_is_admin_up(modem_ppp_get_iface(data->ppp))) {
+			modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_DORMANT);
+			modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_RUN_DIAL_SCRIPT);
+		}
+		break;
 
 	case MODEM_CELLULAR_EVENT_SUSPEND:
 		net_if_carrier_off(modem_ppp_get_iface(data->ppp));
@@ -1417,7 +1572,10 @@ static void modem_cellular_carrier_on_event_handler(struct modem_cellular_data *
 		modem_ppp_release(data->ppp);
 		modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_INIT_POWER_OFF);
 		break;
-
+	case MODEM_CELLULAR_EVENT_RING:
+		LOG_DBG("RING received!");
+		modem_pipe_open_async(data->uart_pipe);
+		break;
 	default:
 		break;
 	}
@@ -1441,10 +1599,12 @@ static void modem_cellular_dormant_event_handler(struct modem_cellular_data *dat
 						 enum modem_cellular_event evt)
 {
 	switch (evt) {
+	case MODEM_CELLULAR_EVENT_RING:
+		LOG_DBG("RING received!");
+		modem_pipe_open_async(data->uart_pipe);
 	case MODEM_CELLULAR_EVENT_PPP_DEAD:
 		modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_RUN_DIAL_SCRIPT);
 		break;
-
 	default:
 		break;
 	}
@@ -1476,7 +1636,10 @@ static void modem_cellular_init_power_off_event_handler(struct modem_cellular_da
 	switch (evt) {
 	case MODEM_CELLULAR_EVENT_CMUX_DISCONNECTED:
 		modem_cellular_stop_timer(data);
-		__fallthrough;
+		data->cmd_pipe = data->uart_pipe;
+		/* Assume the same time as reset pulse is enough to return from CMUX to AT mode */
+		modem_cellular_start_timer(data, K_MSEC(config->reset_pulse_duration_ms));
+		break;
 	case MODEM_CELLULAR_EVENT_TIMEOUT:
 		/* Shutdown script can only be used if cmd_pipe is available, i.e. we are not in
 		 * some intermediary state without a pipe for commands available
@@ -2174,6 +2337,15 @@ static void net_mgmt_event_handler(struct net_mgmt_event_callback *cb, uint64_t 
 	}
 }
 
+static void modem_cellular_ring_gpio_callback(const struct device *dev, struct gpio_callback *cb,
+					      uint32_t pins)
+{
+	struct modem_cellular_data *data =
+		CONTAINER_OF(cb, struct modem_cellular_data, ring_gpio_cb);
+
+	modem_cellular_delegate_event(data, MODEM_CELLULAR_EVENT_RING);
+}
+
 static void modem_cellular_init_apn(struct modem_cellular_data *data)
 {
 #ifdef CONFIG_MODEM_CELLULAR_APN
@@ -2203,9 +2375,8 @@ static int modem_cellular_init(const struct device *dev)
 
 	k_mutex_init(&data->api_lock);
 	k_work_init_delayable(&data->timeout_work, modem_cellular_timeout_handler);
-
 	k_work_init(&data->event_dispatch_work, modem_cellular_event_dispatch_handler);
-	ring_buf_init(&data->event_rb, sizeof(data->event_buf), data->event_buf);
+	k_pipe_init(&data->event_pipe, data->event_buf, sizeof(data->event_buf));
 
 	k_sem_init(&data->suspended_sem, 0, 1);
 
@@ -2218,7 +2389,36 @@ static int modem_cellular_init(const struct device *dev)
 	}
 
 	if (modem_cellular_gpio_is_enabled(&config->reset_gpio)) {
-		gpio_pin_configure_dt(&config->reset_gpio, GPIO_OUTPUT_ACTIVE);
+		gpio_flags_t flags =
+			(config->hold_reset_on_suspend) ? GPIO_OUTPUT_ACTIVE : GPIO_OUTPUT_INACTIVE;
+		gpio_pin_configure_dt(&config->reset_gpio, flags);
+	}
+
+	if (modem_cellular_gpio_is_enabled(&config->ring_gpio)) {
+		int ret;
+
+		ret = gpio_pin_configure_dt(&config->ring_gpio, GPIO_INPUT);
+		if (ret < 0) {
+			LOG_ERR("Failed to configure ring GPIO (%d)", ret);
+			return ret;
+		}
+
+		gpio_init_callback(&data->ring_gpio_cb, modem_cellular_ring_gpio_callback,
+				   BIT(config->ring_gpio.pin));
+
+		ret = gpio_add_callback(config->ring_gpio.port, &data->ring_gpio_cb);
+		if (ret < 0) {
+			LOG_ERR("Failed to add ring GPIO callback (%d)", ret);
+			return ret;
+		}
+
+		ret = gpio_pin_interrupt_configure_dt(&config->ring_gpio, GPIO_INT_EDGE_TO_ACTIVE);
+		if (ret < 0) {
+			LOG_ERR("Failed to configure ring GPIO interrupt (%d)", ret);
+			return ret;
+		}
+
+		LOG_DBG("Ring GPIO interrupt configured");
 	}
 
 	if (modem_cellular_gpio_is_enabled(&config->dtr_gpio)) {
@@ -2250,6 +2450,9 @@ static int modem_cellular_init(const struct device *dev)
 			.receive_buf_size = ARRAY_SIZE(data->cmux_receive_buf),
 			.transmit_buf = data->cmux_transmit_buf,
 			.transmit_buf_size = ARRAY_SIZE(data->cmux_transmit_buf),
+			.enable_runtime_power_management = config->cmux_enable_runtime_power_save,
+			.close_pipe_on_power_save = config->cmux_close_pipe_on_power_save,
+			.idle_timeout = config->cmux_idle_timeout,
 		};
 
 		modem_cmux_init(&data->cmux, &cmux_config);
@@ -2380,11 +2583,11 @@ MODEM_CHAT_SCRIPT_DEFINE(quectel_bg9x_periodic_chat_script,
 			 modem_cellular_chat_callback_handler, 4);
 
 MODEM_CHAT_SCRIPT_CMDS_DEFINE(quectel_bg9x_shutdown_chat_script_cmds,
-			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+QPOWD=1", ok_match));
+			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+QPOWD=1", powerdown_match));
 
 MODEM_CHAT_SCRIPT_DEFINE(quectel_bg9x_shutdown_chat_script,
 			 quectel_bg9x_shutdown_chat_script_cmds, abort_matches,
-			 modem_cellular_chat_callback_handler, 10);
+			 modem_cellular_chat_callback_handler, 1);
 #endif
 
 #if DT_HAS_COMPAT_STATUS_OKAY(quectel_eg25_g)
@@ -2861,10 +3064,9 @@ MODEM_CHAT_SCRIPT_DEFINE(telit_me310g1_shutdown_chat_script,
 #if DT_HAS_COMPAT_STATUS_OKAY(nordic_nrf91_slm)
 MODEM_CHAT_SCRIPT_CMDS_DEFINE(nordic_nrf91_slm_init_chat_script_cmds,
 			      MODEM_CHAT_SCRIPT_CMD_RESP_MULT("AT", allow_match),
-			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CFUN=4", ok_match),
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CMEE=1", ok_match),
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CEREG=1", ok_match),
-			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CEREG?", ok_match),
+			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CGEREP=1", ok_match),
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CGSN", imei_match),
 			      MODEM_CHAT_SCRIPT_CMD_RESP("", ok_match),
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CGMM", cgmm_match),
@@ -2879,6 +3081,8 @@ MODEM_CHAT_SCRIPT_DEFINE(nordic_nrf91_slm_init_chat_script, nordic_nrf91_slm_ini
 			 abort_matches, modem_cellular_chat_callback_handler, 10);
 
 MODEM_CHAT_SCRIPT_CMDS_DEFINE(nordic_nrf91_slm_dial_chat_script_cmds,
+			      MODEM_CHAT_SCRIPT_CMD_RESP("AT#XPPP=0", ok_match),
+			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CFUN=4", ok_match),
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT#XPPP=1", ok_match),
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CFUN=1", ok_match),
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT#XCMUX=2", ok_match));
@@ -2887,6 +3091,13 @@ MODEM_CHAT_SCRIPT_DEFINE(nordic_nrf91_slm_dial_chat_script, nordic_nrf91_slm_dia
 			 dial_abort_matches, modem_cellular_chat_callback_handler, 10);
 
 MODEM_CHAT_SCRIPT_EMPTY_DEFINE(nordic_nrf91_slm_periodic_chat_script);
+
+MODEM_CHAT_SCRIPT_CMDS_DEFINE(nordic_nrf91_slm_shutdown_chat_script_cmds,
+			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CFUN=0", ok_match));
+
+MODEM_CHAT_SCRIPT_DEFINE(nordic_nrf91_slm_shutdown_chat_script,
+			 nordic_nrf91_slm_shutdown_chat_script_cmds, abort_matches,
+			 modem_cellular_chat_callback_handler, 2);
 
 #endif
 
@@ -2927,7 +3138,7 @@ MODEM_CHAT_SCRIPT_DEFINE(sqn_gm02s_periodic_chat_script,
 #endif
 
 #define MODEM_CELLULAR_INST_NAME(name, inst) \
-	_CONCAT_4(name, _, DT_DRV_COMPAT, inst)
+	CONCAT(name, _, DT_DRV_COMPAT, inst)
 
 #define MODEM_CELLULAR_DEFINE_USER_PIPE_DATA(inst, name, size)                                     \
 	MODEM_PIPELINK_DT_INST_DEFINE(inst, name);                                                 \
@@ -2982,27 +3193,38 @@ MODEM_CHAT_SCRIPT_DEFINE(sqn_gm02s_periodic_chat_script,
 
 /* Helper to define modem instance */
 #define MODEM_CELLULAR_DEFINE_INSTANCE(inst, power_ms, reset_ms, startup_ms, shutdown_ms, start,   \
-				       set_baudrate_script,                                        \
-				       init_script,                                                \
-				       dial_script,                                                \
-				       periodic_script,                                            \
-				       shutdown_script)                                            \
+				       set_baudrate_script, init_script, dial_script,              \
+				       periodic_script, shutdown_script)                           \
 	static const struct modem_cellular_config MODEM_CELLULAR_INST_NAME(config, inst) = {       \
 		.uart = DEVICE_DT_GET(DT_INST_BUS(inst)),                                          \
 		.power_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, mdm_power_gpios, {}),                 \
 		.reset_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, mdm_reset_gpios, {}),                 \
 		.wake_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, mdm_wake_gpios, {}),                   \
+		.ring_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, mdm_ring_gpios, {}),                   \
 		.dtr_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, mdm_dtr_gpios, {}),                     \
 		.power_pulse_duration_ms = (power_ms),                                             \
 		.reset_pulse_duration_ms = (reset_ms),                                             \
-		.startup_time_ms  = (startup_ms),                                                  \
+		.startup_time_ms = (startup_ms),                                                   \
 		.shutdown_time_ms = (shutdown_ms),                                                 \
 		.autostarts = DT_INST_PROP_OR(inst, autostarts, (start)),                          \
-		.set_baudrate_chat_script    = (set_baudrate_script),                              \
-		.init_chat_script            = (init_script),                                      \
-		.dial_chat_script            = (dial_script),                                      \
+		.hold_reset_on_suspend =                                                           \
+			DT_INST_ENUM_HAS_VALUE(inst, zephyr_mdm_reset_behavior, hold_on_suspend),  \
+		.reset_on_resume = DT_INST_ENUM_HAS_VALUE(inst, zephyr_mdm_reset_behavior,         \
+							    toggle_on_resume),                     \
+		.reset_on_recovery = DT_INST_ENUM_HAS_VALUE(inst, zephyr_mdm_reset_behavior,       \
+							    toggle_on_recovery),                   \
+		.cmux_enable_runtime_power_save =                                                  \
+			DT_INST_PROP_OR(inst, cmux_enable_runtime_power_save, 0),                  \
+		.cmux_close_pipe_on_power_save =                                                   \
+			DT_INST_PROP_OR(inst, cmux_close_pipe_on_power_save, 0),                   \
+		.use_default_pdp_context = DT_INST_PROP_OR(inst, zephyr_use_default_pdp_ctx, 0),   \
+		.use_default_apn = DT_INST_PROP_OR(inst, zephyr_use_default_apn, 0),               \
+		.cmux_idle_timeout = K_MSEC(DT_INST_PROP_OR(inst, cmux_idle_timeout_ms, 0)),       \
+		.set_baudrate_chat_script = (set_baudrate_script),                                 \
+		.init_chat_script = (init_script),                                                 \
+		.dial_chat_script = (dial_script),                                                 \
 		.periodic_chat_script = (periodic_script),                                         \
-		.shutdown_chat_script  = (shutdown_script),                                        \
+		.shutdown_chat_script = (shutdown_script),                                         \
 		.user_pipes = MODEM_CELLULAR_GET_USER_PIPES(inst),                                 \
 		.user_pipes_size = ARRAY_SIZE(MODEM_CELLULAR_GET_USER_PIPES(inst)),                \
 	};                                                                                         \
@@ -3027,7 +3249,7 @@ MODEM_CHAT_SCRIPT_DEFINE(sqn_gm02s_periodic_chat_script,
 						  (user_pipe_0, 3),                                \
 						  (user_pipe_1, 4))                                \
                                                                                                    \
-	MODEM_CELLULAR_DEFINE_INSTANCE(inst, 1500, 100, 10000, 5000, false,                        \
+	MODEM_CELLULAR_DEFINE_INSTANCE(inst, 500, 1000, 5000, 2000, false,                         \
 				       NULL,                                                       \
 				       &quectel_bg9x_init_chat_script,                             \
 				       &quectel_bg9x_dial_chat_script,                             \
@@ -3237,12 +3459,12 @@ MODEM_CHAT_SCRIPT_DEFINE(sqn_gm02s_periodic_chat_script,
 	MODEM_CELLULAR_DEFINE_AND_INIT_USER_PIPES(inst,                                            \
 						  (gnss_pipe, 3))                                  \
                                                                                                    \
-	MODEM_CELLULAR_DEFINE_INSTANCE(inst, 100, 100, 2000, 10000, false,                         \
+	MODEM_CELLULAR_DEFINE_INSTANCE(inst, 0, 500, 5000, 0, false,                               \
 				       NULL,                                                       \
 				       &nordic_nrf91_slm_init_chat_script,                         \
 				       &nordic_nrf91_slm_dial_chat_script,                         \
 				       &nordic_nrf91_slm_periodic_chat_script,                     \
-				       NULL)
+				       &nordic_nrf91_slm_shutdown_chat_script)
 
 #define MODEM_CELLULAR_DEVICE_SQN_GM02S(inst)                                                      \
 	MODEM_DT_INST_PPP_DEFINE(inst, MODEM_CELLULAR_INST_NAME(ppp, inst), NULL, 98, 1500, 64);   \

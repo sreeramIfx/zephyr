@@ -12,7 +12,6 @@ LOG_MODULE_REGISTER(net_test, CONFIG_NET_SOCKETS_LOG_LEVEL);
 #include <zephyr/sys/mutex.h>
 #include <zephyr/ztest_assert.h>
 
-#include <zephyr/posix/fcntl.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/net/ethernet.h>
 #include <zephyr/net/net_ip.h>
@@ -103,7 +102,7 @@ static uint8_t rx_buf[64];
 static uint8_t tx_buf[64];
 static struct net_in_addr fake_src = { { { 192, 0, 2, 2 } } };
 
-static uint8_t lladdr1[] = { 0x01, 0x01, 0x01, 0x01, 0x01, 0x01 };
+static uint8_t lladdr1[] = { 0x02, 0x01, 0x01, 0x01, 0x01, 0x01 };
 static uint8_t lladdr2[] = { 0x02, 0x02, 0x02, 0x02, 0x02, 0x02 };
 
 struct eth_fake_context {
@@ -195,7 +194,7 @@ static void setup_packet_socket(int *sock, int type, int proto)
 	*sock = zsock_socket(NET_AF_PACKET, type, proto);
 	zassert_true(*sock >= 0, "Cannot create packet socket (%d)", -errno);
 
-	ret = zsock_setsockopt(*sock, SOL_SOCKET, SO_RCVTIMEO, &optval,
+	ret = zsock_setsockopt(*sock, ZSOCK_SOL_SOCKET, ZSOCK_SO_RCVTIMEO, &optval,
 			       sizeof(optval));
 	zassert_ok(ret, "setsockopt failed (%d)", errno);
 }
@@ -270,7 +269,7 @@ static void prepare_udp_socket(int *sock, struct net_sockaddr_in *sockaddr, uint
 	ret = zsock_bind(*sock, (struct net_sockaddr *) sockaddr, sizeof(*sockaddr));
 	zassert_equal(ret, 0, "Cannot bind DGRAM (UDP) socket (%d)", -errno);
 
-	ret = zsock_setsockopt(*sock, SOL_SOCKET, SO_RCVTIMEO, &optval,
+	ret = zsock_setsockopt(*sock, ZSOCK_SOL_SOCKET, ZSOCK_SO_RCVTIMEO, &optval,
 			       sizeof(optval));
 	zassert_ok(ret, "setsockopt failed (%d)", errno);
 }
@@ -470,12 +469,12 @@ ZTEST(socket_packet, test_raw_and_dgram_socket_exchange)
 	int ret;
 	const uint8_t expected_payload_raw[] = {
 		0x02, 0x02, 0x02, 0x02, 0x02, 0x02, /* Dst ll addr */
-		0x01, 0x01, 0x01, 0x01, 0x01, 0x01, /* Src ll addr */
+		0x02, 0x01, 0x01, 0x01, 0x01, 0x01, /* Src ll addr */
 		ETH_P_IP >> 8, ETH_P_IP & 0xFF, /* EtherType */
 		0, 1, 2, 3, 4, 5, 6, 7, 8, 9 /* Payload */
 	};
 	const uint8_t send_payload_raw[] = {
-		0x01, 0x01, 0x01, 0x01, 0x01, 0x01, /* Dst ll addr */
+		0x02, 0x01, 0x01, 0x01, 0x01, 0x01, /* Dst ll addr */
 		0x02, 0x02, 0x02, 0x02, 0x02, 0x02, /* Src ll addr */
 		ETH_P_IP >> 8, ETH_P_IP & 0xFF, /* EtherType */
 		0, 1, 2, 3, 4, 5, 6, 7, 8, 9 /* Payload */
@@ -537,7 +536,7 @@ ZTEST(socket_packet, test_raw_and_dgram_socket_recv)
 	int ret;
 	const uint8_t expected_payload_raw[] = {
 		0x02, 0x02, 0x02, 0x02, 0x02, 0x02, /* Dst ll addr */
-		0x01, 0x01, 0x01, 0x01, 0x01, 0x01, /* Src ll addr */
+		0x02, 0x01, 0x01, 0x01, 0x01, 0x01, /* Src ll addr */
 		ETH_P_IP >> 8, ETH_P_IP & 0xFF, /* EtherType */
 		0, 1, 2, 3, 4, 5, 6, 7, 8, 9 /* Payload */
 	};

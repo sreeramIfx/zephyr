@@ -52,6 +52,7 @@
 
 #include <string.h>
 #include <zephyr/sys/sys_getopt.h>
+#include <zephyr/sys/util.h>
 #include "getopt_common.h"
 
 #include <zephyr/logging/log.h>
@@ -79,12 +80,13 @@ LOG_MODULE_DECLARE(sys_getopt);
 #define W_PREFIX  2
 #endif
 
-static int getopt_internal(struct sys_getopt_state *, int, char *const *, const char *,
-			   const struct sys_getopt_option *, int *, int);
-static int parse_long_options(struct sys_getopt_state *, char *const *, const char *,
-			      const struct sys_getopt_option *, int *, int, int);
-static int gcd(int, int);
-static void permute_args(int, int, int, char *const *);
+static int getopt_internal(struct sys_getopt_state *state, int nargc, char *const *nargv,
+			   const char *options, const struct sys_getopt_option *long_options,
+			   int *idx, int flags);
+static int parse_long_options(struct sys_getopt_state *state, char *const *nargv,
+			      const char *options, const struct sys_getopt_option *long_options,
+			      int *idx, int short_too, int flags);
+static void permute_args(int panonopt_start, int panonopt_end, int opt_end, char *const *nargv);
 
 /* Error messages */
 #define RECARGCHAR "option requires an argument -- %c"
@@ -105,30 +107,13 @@ static int dash_prefix = NO_PREFIX;
 #endif
 
 /*
- * Compute the greatest common divisor of a and b.
- */
-static int gcd(int a, int b)
-{
-	int c;
-
-	c = a % b;
-	while (c != 0) {
-		a = b;
-		b = c;
-		c = a % b;
-	}
-
-	return b;
-}
-
-/*
  * Exchange the block from nonopt_start to nonopt_end with the block
  * from nonopt_end to opt_end (keeping the same order of arguments
  * in each block).
  */
 static void permute_args(int panonopt_start, int panonopt_end, int opt_end, char *const *nargv)
 {
-	int cstart, cyclelen, i, j, ncycle, nnonopts, nopts, pos;
+	int cstart, cyclelen, ncycle, nnonopts, nopts, pos;
 	char *swap;
 
 	/*
@@ -136,13 +121,13 @@ static void permute_args(int panonopt_start, int panonopt_end, int opt_end, char
 	 */
 	nnonopts = panonopt_end - panonopt_start;
 	nopts = opt_end - panonopt_end;
-	ncycle = gcd(nnonopts, nopts);
+	ncycle = sys_gcd(nnonopts, nopts);
 	cyclelen = (opt_end - panonopt_start) / ncycle;
 
-	for (i = 0; i < ncycle; i++) {
+	for (int i = 0; i < ncycle; i++) {
 		cstart = panonopt_end + i;
 		pos = cstart;
-		for (j = 0; j < cyclelen; j++) {
+		for (int j = 0; j < cyclelen; j++) {
 			if (pos >= panonopt_end) {
 				pos -= nnonopts;
 			} else {
@@ -171,7 +156,7 @@ static int parse_long_options(struct sys_getopt_state *state, char *const *nargv
 	char *current_dash = "";
 #endif
 	size_t current_argv_len;
-	int i, match, exact_match, second_partial_match;
+	int match, exact_match, second_partial_match;
 
 	current_argv = state->place;
 #ifdef GNU_COMPATIBLE
@@ -206,7 +191,7 @@ static int parse_long_options(struct sys_getopt_state *state, char *const *nargv
 		current_argv_len = strlen(current_argv);
 	}
 
-	for (i = 0; long_options[i].name; i++) {
+	for (int i = 0; long_options[i].name; i++) {
 		/* find matching long option */
 		if (strncmp(current_argv, long_options[i].name, current_argv_len)) {
 			continue;
@@ -518,7 +503,7 @@ start:
 	if (long_options != NULL && optchar == 'W' && oli[1] == ';') {
 		/* -W long-option */
 		if (*(state->place)) {                   /* no space */
-			;                                /* NOTHING */
+			/* NOTHING */
 		} else if (++(state->optind) >= nargc) { /* no arg */
 			state->place = EMSG;
 			if (PRINT_ERROR) {

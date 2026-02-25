@@ -6,9 +6,9 @@
 
 /dts-v1/;
 
-#include <nxp/nxp_mcxe31b.dtsi>
+#include <nxp/mcx/nxp_mcxe31b.dtsi>
 #include "frdm_mcxe31b-pinctrl.dtsi"
-#include <dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/gpio/arduino-header-r3.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 
@@ -22,16 +22,19 @@
 		led2 = &blue_led;
 		sw0 = &user_button;
 		rtc = &counter_rtc;
+		watchdog0 = &swt_0;
 	};
 
 	chosen {
 		zephyr,sram = &sram;
 		zephyr,itcm = &itcm;
 		zephyr,dtcm = &dtcm;
-		zephyr,flash = &program_flash;
-		zephyr,flash-controller = &flash;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &code_partition;
 		zephyr,console = &lpuart_5;
+		zephyr,edac = &erm0;
 		zephyr,shell-uart = &lpuart_5;
+		zephyr,canbus = &flexcan_0;
 	};
 
 	leds {
@@ -93,12 +96,57 @@
 	};
 };
 
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		ivt_header: partition@0 {
+			label = "ivt-header";
+			reg = <0x00000000 0x100>;
+		};
+
+		code_partition: partition@100 {
+			label = "code-partition";
+			reg = <0x00000100 (DT_SIZE_K(3920) - 0x100)>;
+		};
+	};
+};
+
 &core0 {
 	clock-frequency = <DT_FREQ_M(160)>;
 };
 
+&edma {
+	status = "okay";
+};
+
+&erm0 {
+	status = "okay";
+};
+
+&eim0 {
+	status = "okay";
+};
+
+&eim0_channel14 {
+	status = "okay";
+};
+
+&eim0_channel15 {
+	status = "okay";
+};
+
 &gpiob_h {
 	status = "okay";
+};
+
+&lpuart_2 {
+	pinctrl-0 = <&pinmux_lpuart_2>;
+	pinctrl-names = "default";
+	dmas = <&edma 16 38>, <&edma 17 39>;
+	dma-names = "tx", "rx";
 };
 
 &lpuart_5 {
@@ -108,6 +156,12 @@
 	pinctrl-names = "default";
 	dmas = <&edma 1 44>, <&edma 2 45>;
 	dma-names = "tx", "rx";
+};
+
+&flexcan_0 {
+	pinctrl-0 = <&pinmux_flexcan_0>;
+	pinctrl-names = "default";
+	status = "okay";
 };
 
 &gpioc_l {
@@ -139,6 +193,10 @@
 	workmode = "crystal";
 	delay = <49>;
 	overdrive = <12>;
+};
+
+&pit_0 {
+	status = "okay";
 };
 
 &pll {
@@ -182,3 +240,14 @@
 &counter_rtc {
 	status = "okay";
 };
+
+&swt_0 {
+	status = "okay";
+};
+
+&adc_0 {
+	status = "okay";
+};
+
+/* Add lpuart2 label to lpuart_2. */
+lpuart2: &lpuart_2 {};

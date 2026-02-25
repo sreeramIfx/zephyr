@@ -249,7 +249,17 @@ class MissingProgram(FileNotFoundError):
         super().__init__(errno.ENOENT, os.strerror(errno.ENOENT), program)
 
 
-_RUNNERCAPS_COMMANDS = {'flash', 'debug', 'debugserver', 'attach', 'simulate', 'robot', 'rtt'}
+_RUNNERCAPS_COMMANDS = {
+    "flash",
+    "debug",
+    "debugserver",
+    "attach",
+    "simulate",
+    "robot",
+    "rtt",
+    "reset",
+}
+
 
 @dataclass
 class RunnerCaps:
@@ -288,6 +298,19 @@ class RunnerCaps:
     - reset: whether the runner supports a --reset option, which
       resets the device after a flash operation is complete.
 
+    - reset_types: whether the runner supports a --reset-type=x option,
+      which specifies a runner specific value for selecting a specific type
+      of reset to use when resetting the device.
+
+    - reset_types_supported: a list of values allowed to be passed with the
+      --reset-type option. If the list of supported reset types is
+      dynamic/device specific, this should be omitted, allowing any value to
+      be set and passed directly to the underlying tool. In addition to these,
+      each runner implementation must always be ready to accept `None` in a
+      runner-specific fashion. For user-friendliness, it is recommended to
+      place first in the list the value which has the behavior identical or
+      most similar to `None`.
+
     - extload: whether the runner supports a --extload option, which
       must be given one time and is passed on to the underlying tool
       that the runner wraps.
@@ -304,6 +327,10 @@ class RunnerCaps:
 
     - rtt: whether the runner supports SEGGER RTT. This adds a --rtt-address
       option.
+
+    - skip_load: whether the runner supports the --load/--no-load option, which
+      allows skipping the load of image on target before starting a debug session
+      (this option only affects the 'debug' command)
     '''
 
     commands: set[str] = field(default_factory=lambda: set(_RUNNERCAPS_COMMANDS))
@@ -312,6 +339,8 @@ class RunnerCaps:
     flash_addr: bool = False
     erase: bool = False
     reset: bool = False
+    reset_types: bool = False
+    reset_types_supported: list[str] | None = None
     extload: bool = False
     tool_opt: bool = False
     file: bool = False
@@ -319,6 +348,12 @@ class RunnerCaps:
     rtt: bool = False  # This capability exists separately from the rtt command
                        # to allow other commands to use the rtt address
     dry_run: bool = False
+    skip_load: bool = False
+    batch_debug: bool = False # In batch mode, GDB exits with status 0 after loading;
+                              # for automated debugging, add --batch with 'monitor go',
+                              # 'disconnect', and 'quit' commands (named batch_debug in west),
+                              # unlike interactive debug mode (default),
+                              # which stops and waits for user input
 
     def __post_init__(self):
         if self.mult_dev_ids and not self.dev_id:
@@ -573,7 +608,8 @@ class ZephyrBinaryRunner(abc.ABC):
                                 help="path to binary file")
             parser.add_argument('-t', '--file-type',
                                 dest='file_type',
-                                help="type of binary file")
+                                help="type of binary file. If --file is not given, "
+                                     "selects the build artifact (hex, bin, elf)")
         else:
             parser.add_argument('-f', '--file', help=argparse.SUPPRESS)
             parser.add_argument('-t', '--file-type', help=argparse.SUPPRESS)
@@ -619,6 +655,11 @@ class ZephyrBinaryRunner(abc.ABC):
                                   "Default action depends on each specific runner."
                                   if caps.reset else argparse.SUPPRESS))
 
+        parser.add_argument('--reset-type', dest="reset_type", choices=caps.reset_types_supported,
+                            help=("reset type to use for resetting the device. "
+                                    "Default type depends on each specific runner and target."
+                                    if caps.reset_types else argparse.SUPPRESS))
+
         parser.add_argument('--extload', dest='extload',
                             help=(cls.extload_help() if caps.extload
                                   else argparse.SUPPRESS))
@@ -639,6 +680,16 @@ class ZephyrBinaryRunner(abc.ABC):
         parser.add_argument('--dry-run', action='store_true',
                             help=('''Print all the commands without actually
                             executing them''' if caps.dry_run else argparse.SUPPRESS))
+
+        # by default, 'west debug' is expected to flash before starting the session
+        parser.add_argument('--load', action=argparse.BooleanOptionalAction,
+                            help=("load image on target before 'west debug' session"
+                                  if caps.skip_load else argparse.SUPPRESS),
+                            default=True)
+
+        parser.add_argument('--batch', action=argparse.BooleanOptionalAction,
+                            help="enable west debug batch mode"
+                            if caps.batch_debug else argparse.SUPPRESS)
 
         # Runner-specific options.
         cls.do_add_parser(parser)
@@ -680,8 +731,6 @@ class ZephyrBinaryRunner(abc.ABC):
             _missing_cap(cls, '--tool-opt')
         if args.file and not caps.file:
             _missing_cap(cls, '--file')
-        if args.file_type and not args.file:
-            raise ValueError("--file-type requires --file")
         if args.file_type and not caps.file:
             _missing_cap(cls, '--file-type')
         if args.rtt_address and not caps.rtt:

@@ -301,7 +301,7 @@ static bool net_if_tx(struct net_if *iface, struct net_pkt *pkt)
 
 	} else {
 		/* Drop packet if interface is not up */
-		NET_WARN("iface %d is down", net_if_get_by_iface(iface));
+		NET_DBG("iface %d is down", net_if_get_by_iface(iface));
 		status = -ENETDOWN;
 	}
 
@@ -463,7 +463,7 @@ enum net_verdict net_if_try_send_data(struct net_if *iface, struct net_pkt *pkt,
 	if (!net_if_flag_is_set(iface, NET_IF_LOWER_UP) ||
 	    net_if_flag_is_set(iface, NET_IF_SUSPENDED)) {
 		/* Drop packet if interface is not up */
-		NET_WARN("iface %d is down", net_if_get_by_iface(iface));
+		NET_DBG("iface %d is down", net_if_get_by_iface(iface));
 		verdict = NET_DROP;
 		status = -ENETDOWN;
 		goto done;
@@ -4534,7 +4534,7 @@ struct net_if_addr *net_if_ipv4_addr_add(struct net_if *iface,
 	struct net_if_addr *ifaddr = NULL;
 	struct net_if_addr_ipv4 *cur;
 	struct net_if_ipv4 *ipv4;
-	bool do_acd = false;
+	bool do_acd = false, override = false;
 	int idx;
 
 	net_if_lock(iface);
@@ -4567,6 +4567,7 @@ struct net_if_addr *net_if_ipv4_addr_add(struct net_if *iface,
 		    && cur->ipv4.addr_type == NET_ADDR_OVERRIDABLE) {
 			ifaddr = &cur->ipv4;
 			idx = i;
+			override = true;
 			break;
 		}
 
@@ -4578,6 +4579,21 @@ struct net_if_addr *net_if_ipv4_addr_add(struct net_if *iface,
 	}
 
 	if (ifaddr) {
+		/* If we are overriding an existing address, remember to cancel
+		 * acd and send del event. Without these, mDNS announcement will
+		 * send also the old address that is no longer in use.
+		 */
+		if (override) {
+			/* But do not send address removal if the address is the same */
+			if (!net_ipv4_addr_cmp(&ifaddr->address.in_addr, addr)) {
+				net_ipv4_acd_cancel(iface, ifaddr);
+				net_mgmt_event_notify_with_info(NET_EVENT_IPV4_ADDR_DEL,
+								iface,
+								&ifaddr->address.in_addr,
+								sizeof(struct net_in_addr));
+			}
+		}
+
 		ifaddr->is_used = true;
 		ifaddr->is_added = true;
 		ifaddr->address.family = NET_AF_INET;
@@ -5419,9 +5435,7 @@ static void remove_ipv4_ifaddr(struct net_if *iface,
 		goto out;
 	}
 
-#if defined(CONFIG_NET_IPV4_ACD)
 	net_ipv4_acd_cancel(iface, ifaddr);
-#endif
 
 	net_mgmt_event_notify_with_info(NET_EVENT_IPV4_ADDR_DEL,
 					iface,

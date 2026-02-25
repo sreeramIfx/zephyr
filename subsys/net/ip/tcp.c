@@ -2315,7 +2315,7 @@ static enum net_verdict tcp_recv(struct net_conn *net_conn,
 	if (th_flags(th) & SYN && !(th_flags(th) & ACK)) {
 		struct tcp *conn_old = ((struct net_context *)user_data)->tcp;
 
-		if (tcp_backlog_is_full(conn_old)) {
+		if (conn_old == NULL || tcp_backlog_is_full(conn_old)) {
 			/* If the connection backlog is full, ignore the SYN
 			 * packet (same behavior as on Linux). Retransmitted SYN
 			 * attempts may be successful later.
@@ -3289,7 +3289,7 @@ static enum net_verdict tcp_in(struct tcp *conn, struct net_pkt *pkt)
 			}
 		}
 #endif
-		NET_ASSERT((conn->send_data_total == 0) ||
+		NET_ASSERT((conn->send_data_total == 0) || (conn->send_win == 0) ||
 			   k_work_delayable_is_pending(&conn->send_data_timer),
 			   "conn: %p, Missing a subscription "
 				"of the send_data queue timer", conn);
@@ -3947,9 +3947,9 @@ int net_tcp_connect(struct net_context *context,
 
 	NET_DBG("[%p] context: %p, local: %s, remote: %s", conn, context,
 		net_sprint_addr(local_addr->sa_family,
-				(const void *)&net_sin(local_addr)->sin_addr),
+				(const void *)&net_sin6(local_addr)->sin6_addr),
 		net_sprint_addr(remote_addr->sa_family,
-				(const void *)&net_sin(remote_addr)->sin_addr));
+				(const void *)&net_sin6(remote_addr)->sin6_addr));
 
 	conn->iface = net_context_get_iface(context);
 	tcp_derive_rto(conn);
@@ -4031,9 +4031,9 @@ int net_tcp_connect(struct net_context *context,
 
 	NET_DBG("[%p] src: %s, dst: %s", conn,
 		net_sprint_addr(conn->src.sa.sa_family,
-				(const void *)&conn->src.sin.sin_addr),
+				(const void *)&conn->src.sin6.sin6_addr),
 		net_sprint_addr(conn->dst.sa.sa_family,
-				(const void *)&conn->dst.sin.sin_addr));
+				(const void *)&conn->dst.sin6.sin6_addr));
 
 	net_context_set_state(context, NET_CONTEXT_CONNECTING);
 
@@ -4746,6 +4746,25 @@ struct k_sem *net_tcp_conn_sem_get(struct net_context *context)
 	return &conn->connect_sem;
 }
 
+static bool is_bind_addr_unspecified(struct net_context *context)
+{
+	struct net_sockaddr_storage local = { 0 };
+	net_socklen_t addrlen = sizeof(local);
+	bool ret = true;
+
+	if (net_tcp_endpoint_copy(context, net_sad(&local), 0, &addrlen) != 0) {
+		return ret;
+	}
+
+	if (IS_ENABLED(CONFIG_NET_IPV4) && local.ss_family == NET_AF_INET) {
+		ret = net_ipv4_is_addr_unspecified(&net_sin(net_sad(&local))->sin_addr);
+	} else if (IS_ENABLED(CONFIG_NET_IPV6) && local.ss_family == NET_AF_INET6) {
+		ret = net_ipv6_is_addr_unspecified(&net_sin6(net_sad(&local))->sin6_addr);
+	}
+
+	return ret;
+}
+
 static void close_tcp_conn(struct tcp *conn, void *user_data)
 {
 	struct net_if *iface = user_data;
@@ -4759,10 +4778,20 @@ static void close_tcp_conn(struct tcp *conn, void *user_data)
 		return;
 	}
 
+	if (is_bind_addr_unspecified(context)) {
+		return;
+	}
+
+	if (conn->state == TCP_CLOSED) {
+		return;
+	}
+
 	/* net_tcp_put() will handle decrementing refcount on stack's behalf */
 	if (net_context_get_state(context) != NET_CONTEXT_LISTENING) {
 		net_tcp_put(context, true);
 	} else {
+		k_mutex_lock(&conn->lock, K_FOREVER);
+
 		if (context->conn_handler) {
 			net_conn_unregister(context->conn_handler);
 			context->conn_handler = NULL;
@@ -4770,12 +4799,20 @@ static void close_tcp_conn(struct tcp *conn, void *user_data)
 
 		if (conn->accept_cb != NULL) {
 			conn->accept_cb(conn->context, NULL, 0, -ENETDOWN, context->user_data);
+			conn->accept_cb = NULL;
 		}
+
+		k_mutex_unlock(&conn->lock);
 	}
 }
 
 void net_tcp_close_all_for_iface(struct net_if *iface)
 {
+	if (IS_ENABLED(CONFIG_NET_TCP_PRESERVE_CONTEXT_STATE_ON_IFACE_DOWN)) {
+		NET_INFO("Not closing TCP connections at interface down");
+		return;
+	}
+
 	net_tcp_foreach(close_tcp_conn, iface);
 }
 

@@ -741,6 +741,11 @@ static int dhcpv4_get_client_id(struct dhcp_msg *msg, uint8_t *options,
 {
 	int ret;
 
+	client_id->hw_addr_type = msg->htype;
+	memcpy(client_id->hw_addr_buf, msg->chaddr, min(msg->hlen,
+			DHCPV4_HARDWARE_ADDRESS_MAX_SIZE));
+	client_id->hw_addr_len = msg->hlen;
+
 	client_id->len = sizeof(client_id->buf);
 
 	ret = dhcpv4_find_client_id_option(options, optlen, client_id->buf,
@@ -1550,7 +1555,7 @@ int net_dhcpv4_server_start(struct net_if *iface, struct net_in_addr *base_addr)
 		.sin_addr = NET_INADDR_ANY_INIT,
 		.sin_port = net_htons(DHCPV4_SERVER_PORT),
 	};
-	struct ifreq ifreq = { 0 };
+	struct net_ifreq ifreq = { 0 };
 	int ret, sock = -1, slot = -1;
 	const struct net_in_addr *server_addr;
 	struct net_in_addr netmask;
@@ -1618,7 +1623,7 @@ int net_dhcpv4_server_start(struct net_if *iface, struct net_in_addr *base_addr)
 		goto error;
 	}
 
-	ret = zsock_setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, &ifreq,
+	ret = zsock_setsockopt(sock, ZSOCK_SOL_SOCKET, ZSOCK_SO_BINDTODEVICE, &ifreq,
 			       sizeof(ifreq));
 	if (ret < 0) {
 		ret = -errno;

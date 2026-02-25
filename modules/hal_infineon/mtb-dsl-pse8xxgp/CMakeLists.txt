@@ -51,10 +51,7 @@ if(CONFIG_USE_INFINEON_UART OR CONFIG_USE_INFINEON_I2C OR CONFIG_USE_INFINEON_SP
   zephyr_library_sources(${pdl_drv_dir}/source/cy_scb_common.c)
 endif()
 
-if(CONFIG_USE_INFINEON_DMA OR CONFIG_USE_INFINEON_SMIF)
-  zephyr_library_sources(${pdl_drv_dir}/source/cy_dma.c)
-  zephyr_library_sources(${pdl_drv_dir}/source/cy_dmac.c)
-endif()
+zephyr_library_sources_ifdef(CONFIG_USE_INFINEON_DMA ${pdl_drv_dir}/source/cy_dma.c)
 
 zephyr_library_sources(${pdl_drv_dir}/source/cy_syspm_v4.c)
 zephyr_code_relocate(FILES ${pdl_drv_dir}/source/cy_syspm_v4.c LOCATION RAM)
@@ -93,11 +90,8 @@ zephyr_library_sources(${pdl_drv_dir}/source/cy_ppc.c)
 zephyr_library_sources(${pdl_drv_dir}/source/cy_syspm_pdcm.c)
 zephyr_library_sources(${pdl_drv_dir}/source/cy_syspm_ppu.c)
 zephyr_library_sources(${pdl_drv_dir}/source/ppu_v1.c)
-zephyr_library_sources(${pdl_drv_dir}/source/cy_smif.c)
 
 zephyr_library_sources(${pdl_drv_dir}/source/cy_trigmux.c)
-zephyr_library_sources(${pdl_drv_dir}/source/cy_wdt.c)
-zephyr_library_sources(${pdl_drv_dir}/source/cy_tcpwm_pwm.c)
 
 zephyr_include_directories(${hal_dir}/include)
 zephyr_library_sources(${hal_dir}/source/mtb_hal_clock.c)

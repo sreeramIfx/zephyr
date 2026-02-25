@@ -210,6 +210,8 @@ struct bt_hci_cmd_hdr {
 #define BT_LE_FEAT_BIT_CHANNEL_SOUNDING_TONE_QUAL_IND    48
 #define BT_LE_FEAT_BIT_EXTENDED_FEAT_SET        63
 #define BT_LE_FEAT_BIT_FRAME_SPACE_UPDATE       65
+#define BT_LE_FEAT_BIT_SHORTER_CONN_INTERVALS   72
+#define BT_LE_FEAT_BIT_SHORTER_CONN_INTERVALS_HOST_SUPP  73
 
 #define BT_LE_FEAT_TEST(feat, n)                (feat[(n) >> 3] & \
 						 BIT((n) & 7))
@@ -290,6 +292,10 @@ struct bt_hci_cmd_hdr {
 						  BT_LE_FEAT_BIT_EXTENDED_FEAT_SET)
 #define BT_FEAT_LE_FRAME_SPACE_UPDATE_SET(feat)   BT_LE_FEAT_TEST(feat, \
 						  BT_LE_FEAT_BIT_FRAME_SPACE_UPDATE)
+#define BT_FEAT_LE_SHORTER_CONN_INTERVALS(feat)   BT_LE_FEAT_TEST(feat, \
+						  BT_LE_FEAT_BIT_SHORTER_CONN_INTERVALS)
+#define BT_FEAT_LE_SHORTER_CONN_INTERVALS_HOST_SUPP(feat) BT_LE_FEAT_TEST(feat, \
+						  BT_LE_FEAT_BIT_SHORTER_CONN_INTERVALS_HOST_SUPP)
 
 #define BT_FEAT_LE_CIS(feat)            (BT_FEAT_LE_CIS_CENTRAL(feat) | \
 					BT_FEAT_LE_CIS_PERIPHERAL(feat))
@@ -706,71 +712,31 @@ struct bt_hci_rp_write_conn_accept_timeout {
 #define BT_BREDR_SCAN_INQUIRY                   0x01
 #define BT_BREDR_SCAN_PAGE                      0x02
 
+/** HCI opcode for Write Page Scan Activity. */
+#define BT_HCI_OP_WRITE_PAGE_SCAN_ACTIVITY      BT_OP(BT_OGF_BASEBAND, 0x001c) /* 0x0c1c */
+/** HCI command parameters for Write Page Scan Activity. */
+struct bt_hci_cp_write_page_scan_activity {
+	/** Page scan interval in 0.625 ms units. */
+	uint16_t interval;
+	/** Page scan window in 0.625 ms units. */
+	uint16_t window;
+} __packed;
+
+/** HCI opcode for Write Inquiry Scan Activity. */
+#define BT_HCI_OP_WRITE_INQUIRY_SCAN_ACTIVITY   BT_OP(BT_OGF_BASEBAND, 0x001e) /* 0x0c1e */
+/** HCI command parameters for Write Inquiry Scan Activity. */
+struct bt_hci_cp_write_inquiry_scan_activity {
+	/** Inquiry scan interval in 0.625 ms units. */
+	uint16_t interval;
+	/** Inquiry scan window in 0.625 ms units. */
+	uint16_t window;
+} __packed;
+
 #define BT_HCI_OP_READ_CLASS_OF_DEVICE          BT_OP(BT_OGF_BASEBAND, 0x0023) /* 0x0c23 */
 struct bt_hci_rp_read_class_of_device {
 	uint8_t  status;
 	uint8_t  class_of_device[3];
 } __packed;
-
-#define BT_COD(major_service, major_device, minor_device)                         \
-	(((uint32_t)major_service << 13) | ((uint32_t)major_device << 8) |            \
-	 ((uint32_t)minor_device << 2))
-#define BT_COD_VALID(cod) ((0 == (cod[0] & (BIT(0) | BIT(1)))) ? true : false)
-#define BT_COD_MAJOR_SERVICE_CLASSES(cod)                                         \
-	((((uint32_t)cod[2] & 0xFF) >> 5) | (((uint32_t)cod[1] & 0xD0) >> 5))
-#define BT_COD_MAJOR_DEVICE_CLASS(cod) ((((uint32_t)cod[1]) & 0x1FUL))
-#define BT_COD_MINOR_DEVICE_CLASS(cod) (((((uint32_t)cod[0]) & 0xFF) >> 2))
-
-#define BT_COD_MAJOR_MISC           0x00
-#define BT_COD_MAJOR_COMPUTER       0x01
-#define BT_COD_MAJOR_PHONE          0x02
-#define BT_COD_MAJOR_LAN_NETWORK_AP 0x03
-#define BT_COD_MAJOR_AUDIO_VIDEO    0x04
-#define BT_COD_MAJOR_PERIPHERAL     0x05
-#define BT_COD_MAJOR_IMAGING        0x06
-#define BT_COD_MAJOR_WEARABLE       0x07
-#define BT_COD_MAJOR_TOY            0x08
-#define BT_COD_MAJOR_HEALTH         0x09
-#define BT_COD_MAJOR_UNCATEGORIZED  0x1F
-
-/* Minor Device Class field - Computer Major Class */
-#define BT_COD_MAJOR_COMPUTER_MINOR_UNCATEGORIZED         0x00
-#define BT_COD_MAJOR_COMPUTER_MINOR_DESKTOP               0x01
-#define BT_COD_MAJOR_COMPUTER_MINOR_SERVER_CLASS_COMPUTER 0x02
-#define BT_COD_MAJOR_COMPUTER_MINOR_LAPTOP                0x03
-#define BT_COD_MAJOR_COMPUTER_MINOR_HANDHELD_PC_PDA       0x04
-#define BT_COD_MAJOR_COMPUTER_MINOR_PALM_SIZE_PC_PDA      0x05
-#define BT_COD_MAJOR_COMPUTER_MINOR_WEARABLE_COMPUTER     0x06
-#define BT_COD_MAJOR_COMPUTER_MINOR_TABLET                0x07
-
-/* Minor Device Class field - Phone Major Class */
-#define BT_COD_MAJOR_PHONE_MINOR_UNCATEGORIZED             0x00
-#define BT_COD_MAJOR_PHONE_MINOR_CELLULAR                  0x01
-#define BT_COD_MAJOR_PHONE_MINOR_CORDLESS                  0x02
-#define BT_COD_MAJOR_PHONE_MINOR_SMARTPHONE                0x03
-#define BT_COD_MAJOR_PHONE_MINOR_WIRED_MODEM_VOICE_GATEWAY 0x04
-#define BT_COD_MAJOR_PHONE_MINOR_ISDN                      0x05
-
-/* Minor Device Class field - Audio/Video Major Class */
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_UNCATEGORIZED             0x00
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_WEARABLE_HEADSET          0x01
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_HANDS_FREE                0x02
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_RFU                       0x03
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_MICROPHONE                0x04
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_LOUDSPEAKER               0x05
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_HEADPHONES                0x06
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_PORTABLE_AUDIO            0x07
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_CAR_AUDIO                 0x08
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_SET_TOP_BOX               0x09
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_HIFI_AUDIO                0x0A
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_VCR                       0x0B
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_VIDEO_CAMERA              0x0C
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_CAMCORDER                 0x0D
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_VIDEO_MONITOR             0x0E
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_VIDEO_DISPLAY_LOUDSPEAKER 0x0F
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_VIDEO_CONFERENCING        0x10
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_RFU2                      0x11
-#define BT_COD_MAJOR_AUDIO_VIDEO_MINOR_GAME_TOY                  0x12
 
 #define BT_HCI_OP_WRITE_CLASS_OF_DEVICE         BT_OP(BT_OGF_BASEBAND, 0x0024) /* 0x0c24 */
 struct bt_hci_cp_write_class_of_device {
@@ -907,9 +873,25 @@ struct bt_hci_cp_write_current_iac_lap {
 	struct bt_hci_iac_lap lap[0];
 } __packed;
 
+/** HCI opcode for Write Inquiry Scan Type. */
+#define BT_HCI_OP_WRITE_INQUIRY_SCAN_TYPE       BT_OP(BT_OGF_BASEBAND, 0x0043) /* 0x0c43 */
+/** HCI command parameters for Write Inquiry Scan Type. */
+struct bt_hci_cp_write_inquiry_scan_type {
+	/** Inquiry scan type. */
+	uint8_t type;
+} __packed;
+
 #define BT_HCI_OP_WRITE_INQUIRY_MODE            BT_OP(BT_OGF_BASEBAND, 0x0045) /* 0x0c45 */
 struct bt_hci_cp_write_inquiry_mode {
 	uint8_t  mode;
+} __packed;
+
+/** HCI opcode for Write Page Scan Type. */
+#define BT_HCI_OP_WRITE_PAGE_SCAN_TYPE          BT_OP(BT_OGF_BASEBAND, 0x0047) /* 0x0c47 */
+/** HCI command parameters for Write Page Scan Type. */
+struct bt_hci_cp_write_page_scan_type {
+	/** Page scan type. */
+	uint8_t type;
 } __packed;
 
 #define BT_HCI_OP_WRITE_SSP_MODE                BT_OP(BT_OGF_BASEBAND, 0x0056) /* 0x0c56 */
@@ -2925,6 +2907,66 @@ struct bt_hci_cp_le_frame_space_update {
 
 #define BT_HCI_OP_LE_FRAME_SPACE_UPDATE BT_OP(BT_OGF_LE, 0x009D) /* 0x209D */
 
+/** All limits according to BT Core spec 6.2 [Vol 4, Part E, 7.8.154]. */
+#define BT_HCI_LE_SCI_INTERVAL_MIN_125US   (0x0003U)
+#define BT_HCI_LE_SCI_INTERVAL_MAX_125US   (0x7D00U)
+#define BT_HCI_LE_SCI_INTERVAL_MIN_US      (375U)
+#define BT_HCI_LE_SCI_INTERVAL_MAX_US      (4000000U)
+#define BT_HCI_LE_SCI_INTERVAL_UNIT_US     (125U)
+
+#define BT_HCI_LE_SCI_STRIDE_MIN_125US     (0x0001U)
+
+#define BT_HCI_LE_MIN_SUPP_CONN_INT_MIN_US (375U)
+#define BT_HCI_LE_MIN_SUPP_CONN_INT_MAX_US (7500U)
+
+#define BT_HCI_LE_SCI_CE_LEN_MIN_125US     (0x0001U)
+#define BT_HCI_LE_SCI_CE_LEN_MAX_125US     (0x3E7FU)
+
+struct bt_hci_le_read_min_supported_conn_interval_group {
+	uint16_t group_min;
+	uint16_t group_max;
+	uint16_t group_stride;
+} __packed;
+
+struct bt_hci_op_le_read_min_supported_conn_interval {
+	uint8_t status;
+	uint8_t min_supported_conn_interval;
+	uint8_t num_groups;
+	struct bt_hci_le_read_min_supported_conn_interval_group groups[];
+} __packed;
+
+#define BT_HCI_OP_LE_READ_MIN_SUPPORTED_CONN_INTERVAL                                    \
+	BT_OP(BT_OGF_LE, 0x00A3) /* 0x20A3 */
+
+struct bt_hci_op_le_set_default_rate_parameters {
+	uint16_t conn_interval_min;
+	uint16_t conn_interval_max;
+	uint16_t subrate_min;
+	uint16_t subrate_max;
+	uint16_t max_latency;
+	uint16_t continuation_number;
+	uint16_t supervision_timeout;
+	uint16_t min_ce_len;
+	uint16_t max_ce_len;
+} __packed;
+
+#define BT_HCI_OP_LE_SET_DEFAULT_RATE_PARAMETERS BT_OP(BT_OGF_LE, 0x00A2) /* 0x20A2 */
+
+struct bt_hci_op_le_connection_rate_request {
+	uint16_t handle;
+	uint16_t conn_interval_min;
+	uint16_t conn_interval_max;
+	uint16_t subrate_min;
+	uint16_t subrate_max;
+	uint16_t max_latency;
+	uint16_t continuation_number;
+	uint16_t supervision_timeout;
+	uint16_t min_ce_len;
+	uint16_t max_ce_len;
+} __packed;
+
+#define BT_HCI_OP_LE_CONNECTION_RATE_REQUEST BT_OP(BT_OGF_LE, 0x00A1) /* 0x20A1 */
+
 /* Event definitions */
 
 #define BT_HCI_EVT_UNKNOWN                      0x00
@@ -3303,9 +3345,12 @@ struct bt_hci_evt_le_advertising_report {
 /** All limits according to BT Core Spec v5.4 [Vol 4, Part E]. */
 #define BT_HCI_LE_INTERVAL_MIN           0x0006
 #define BT_HCI_LE_INTERVAL_MAX           0x0c80
+#define BT_HCI_LE_PERIPHERAL_LATENCY_MIN (0x0000U)
 #define BT_HCI_LE_PERIPHERAL_LATENCY_MAX 0x01f3
 #define BT_HCI_LE_SUPERVISON_TIMEOUT_MIN 0x000a
 #define BT_HCI_LE_SUPERVISON_TIMEOUT_MAX 0x0c80
+
+#define BT_HCI_LE_INTERVAL_UNIT_US (1250U)
 
 #define BT_HCI_EVT_LE_CONN_UPDATE_COMPLETE      0x03
 struct bt_hci_evt_le_conn_update_complete {
@@ -3694,6 +3739,7 @@ struct bt_hci_evt_le_biginfo_adv_report {
 /** All limits according to BT Core Spec v5.4 [Vol 4, Part E]. */
 #define BT_HCI_LE_SUBRATE_FACTOR_MIN   0x0001
 #define BT_HCI_LE_SUBRATE_FACTOR_MAX   0x01f4
+#define BT_HCI_LE_CONTINUATION_NUM_MIN (0x0000U)
 #define BT_HCI_LE_CONTINUATION_NUM_MAX 0x01f3
 
 #define BT_HCI_EVT_LE_SUBRATE_CHANGE            0x23
@@ -3974,7 +4020,7 @@ struct bt_hci_le_cs_step_data_mode_1 {
 	union {
 		int16_t toa_tod_initiator;
 		int16_t tod_toa_reflector;
-	};
+	} __packed;
 	uint8_t packet_antenna;
 } __packed;
 
@@ -3992,7 +4038,7 @@ struct bt_hci_le_cs_step_data_mode_1_ss_rtt {
 	union {
 		int16_t toa_tod_initiator;
 		int16_t tod_toa_reflector;
-	};
+	} __packed;
 	uint8_t packet_antenna;
 	uint8_t packet_pct1[4];
 	uint8_t packet_pct2[4];
@@ -4031,7 +4077,7 @@ struct bt_hci_le_cs_step_data_mode_3 {
 	union {
 		int16_t toa_tod_initiator;
 		int16_t tod_toa_reflector;
-	};
+	} __packed;
 	uint8_t packet_antenna;
 	uint8_t antenna_permutation_index;
 	struct bt_hci_le_cs_step_data_tone_info tone_info[];
@@ -4051,7 +4097,7 @@ struct bt_hci_le_cs_step_data_mode_3_ss_rtt {
 	union {
 		int16_t toa_tod_initiator;
 		int16_t tod_toa_reflector;
-	};
+	} __packed;
 	uint8_t packet_antenna;
 	uint8_t packet_pct1[4];
 	uint8_t packet_pct2[4];
@@ -4138,6 +4184,17 @@ struct bt_hci_evt_le_frame_space_update_complete {
 	uint16_t spacing_types;
 } __packed;
 
+#define BT_HCI_EVT_LE_CONN_RATE_CHANGE 0x37
+struct bt_hci_evt_le_conn_rate_change {
+	uint8_t  status;
+	uint16_t handle;
+	uint16_t conn_interval;
+	uint16_t subrate_factor;
+	uint16_t peripheral_latency;
+	uint16_t continuation_number;
+	uint16_t supervision_timeout;
+} __packed;
+
 /* Event mask bits */
 
 #define BT_EVT_BIT(n) (1ULL << (n))
@@ -4153,6 +4210,7 @@ struct bt_hci_evt_le_frame_space_update_complete {
 #define BT_EVT_MASK_REMOTE_VERSION_INFO          BT_EVT_BIT(11)
 #define BT_EVT_MASK_HARDWARE_ERROR               BT_EVT_BIT(15)
 #define BT_EVT_MASK_ROLE_CHANGE                  BT_EVT_BIT(17)
+#define BT_EVT_MASK_MODE_CHANGE                  BT_EVT_BIT(19)
 #define BT_EVT_MASK_PIN_CODE_REQ                 BT_EVT_BIT(21)
 #define BT_EVT_MASK_LINK_KEY_REQ                 BT_EVT_BIT(22)
 #define BT_EVT_MASK_LINK_KEY_NOTIFY              BT_EVT_BIT(23)
@@ -4240,6 +4298,7 @@ struct bt_hci_evt_le_frame_space_update_complete {
 #define BT_EVT_MASK_LE_CS_TEST_END_COMPLETE                           BT_EVT_BIT(50)
 
 #define BT_EVT_MASK_LE_FRAME_SPACE_UPDATE_COMPLETE BT_EVT_BIT(52)
+#define BT_EVT_MASK_LE_CONN_RATE_CHANGE            BT_EVT_BIT(54)
 
 /** HCI Error Codes, BT Core Spec v5.4 [Vol 1, Part F]. */
 #define BT_HCI_ERR_SUCCESS                      0x00

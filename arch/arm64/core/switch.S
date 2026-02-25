@@ -74,6 +74,18 @@ SECTION_FUNC(TEXT, z_arm64_context_switch)
 	ldp	x0, x1, [sp], #16
 #endif
 
+#ifdef CONFIG_ARM_PAC_PER_THREAD
+	/*
+	 * Save and restore PAC keys during context switch.
+	 * This ensures each thread has its own unique PAC keys for security isolation.
+	 * Now safe to call C function since PAC key management functions are compiled
+	 * without PAC protection (branch-protection=none).
+	 */
+	stp	x0, x1, [sp, #-16]!
+	bl	z_arm64_pac_thread_context_switch
+	ldp	x0, x1, [sp], #16
+#endif
+
 #ifdef CONFIG_SMP
 	/* Write barrier: ensure all preceding writes are executed
 	* before writing the switch handle
@@ -153,8 +165,15 @@ SECTION_FUNC(TEXT, z_arm64_sync_exc)
 
 #ifdef CONFIG_FPU_SHARING
 	cmp	x1, #0x07 /*Access to SIMD or floating-point */
-	bne	1f
-	mov	x0, sp
+	beq	fpu_sve_trap
+#ifdef CONFIG_ARM64_SVE
+	cmp	x1, #0x19 /*Trapped access to SVE functionality */
+	beq	fpu_sve_trap
+#endif
+	b	1f
+fpu_sve_trap:
+	mov	x0, sp  /* ESF pointer */
+	/* x1 already contains exception class (EC) - pass as second argument */
 	bl	z_arm64_fpu_trap
 	b	z_arm64_exit_exc_fpu_done
 1:

@@ -791,6 +791,9 @@ static int flash_stm32h7_write(const struct device *dev, off_t offset, const voi
 		rc = rc2;
 	}
 
+#ifdef CONFIG_DCACHE
+	flash_stm32h7_flush_caches(dev, offset, len);
+#endif
 	flash_stm32_sem_give(dev);
 
 	return rc;
@@ -930,11 +933,6 @@ static int stm32h7_flash_init(const struct device *dev)
 	/* Only stm32h7 dual core devices have the clocks property */
 	struct flash_stm32_priv *p = FLASH_STM32_PRIV(dev);
 	const struct device *const clk = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
-
-	if (!device_is_ready(clk)) {
-		LOG_ERR("clock control device not ready");
-		return -ENODEV;
-	}
 
 	/* enable clock : enable the RCC_AHB3ENR_FLASHEN bit */
 	if (clock_control_on(clk, (clock_control_subsys_t)&p->pclken) != 0) {

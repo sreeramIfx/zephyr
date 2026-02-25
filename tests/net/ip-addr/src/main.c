@@ -115,9 +115,7 @@ struct net_test_context {
 
 int net_test_init(const struct device *dev)
 {
-	struct net_test_context *net_test_context = dev->data;
-
-	net_test_context = net_test_context;
+	ARG_UNUSED(dev);
 
 	return 0;
 }
@@ -252,7 +250,7 @@ static const char *get_addr_state(struct net_if *iface,
 
 ZTEST(ip_addr_fn, test_ipv6_addresses)
 {
-	struct net_in6_addr loopback = IN6ADDR_LOOPBACK_INIT;
+	struct net_in6_addr loopback = NET_IN6ADDR_LOOPBACK_INIT;
 	struct net_in6_addr any = NET_IN6ADDR_ANY_INIT;
 	struct net_in6_addr mcast = { { { 0xff, 0x84, 0, 0, 0, 0, 0, 0,
 				      0, 0, 0, 0, 0, 0, 0, 0x2 } } };

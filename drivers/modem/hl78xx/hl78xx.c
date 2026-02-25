@@ -22,7 +22,9 @@
 #include "hl78xx.h"
 #include "hl78xx_chat.h"
 #include "hl78xx_cfg.h"
-
+#ifdef CONFIG_HL78XX_GNSS
+#include "hl78xx_gnss.h"
+#endif /* CONFIG_HL78XX_GNSS */
 #define MAX_SCRIPT_AT_CMD_RETRY 3
 
 #define MDM_NODE                         DT_ALIAS(modem)
@@ -71,7 +73,7 @@ const static struct hl78xx_state_handlers hl78xx_state_table[];
 /** Dispatch an event to the registered event dispatcher, if any.
  *
  */
-static void event_dispatcher_dispatch(struct hl78xx_evt *notif)
+void event_dispatcher_dispatch(struct hl78xx_evt *notif)
 {
 	if (event_dispatcher != NULL) {
 		event_dispatcher(notif);
@@ -108,12 +110,18 @@ static const char *hl78xx_state_str(enum hl78xx_state state)
 		return "await registered";
 	case MODEM_HL78XX_STATE_CARRIER_ON:
 		return "carrier on";
+	case MODEM_HL78XX_STATE_FOTA:
+		return "fota";
 	case MODEM_HL78XX_STATE_CARRIER_OFF:
 		return "carrier off";
 	case MODEM_HL78XX_STATE_SIM_POWER_OFF:
 		return "sim power off";
 	case MODEM_HL78XX_STATE_AIRPLANE:
 		return "airplane mode";
+#ifdef CONFIG_HL78XX_GNSS
+	case MODEM_HL78XX_STATE_RUN_GNSS_INIT_SCRIPT:
+		return "run gnss init script";
+#endif /* CONFIG_HL78XX_GNSS */
 	case MODEM_HL78XX_STATE_INIT_POWER_OFF:
 		return "init power off";
 	case MODEM_HL78XX_STATE_POWER_OFF_PULSE:
@@ -152,6 +160,56 @@ static const char *hl78xx_event_str(enum hl78xx_event event)
 		return "bus closed";
 	case MODEM_HL78XX_EVENT_SOCKET_READY:
 		return "socket ready";
+#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
+	case MODEM_HL78XX_EVENT_NTN_POSREQ:
+		return "ntn posreq";
+#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
+	case MODEM_HL78XX_EVENT_PHONE_FUNCTIONALITY_CHANGED:
+		return "phone functionality changed";
+#ifdef CONFIG_HL78XX_GNSS
+	case MODEM_HL78XX_EVENT_GNSS_START_REQUESTED:
+		return "gnss event start requested";
+	case MODEM_HL78XX_EVENT_GNSS_SEARCH_STARTED:
+		return "gnss search started";
+	case MODEM_HL78XX_EVENT_GNSS_SEARCH_STARTED_FAILED:
+		return "gnss search started failed";
+	case MODEM_HL78XX_EVENT_GNSS_FIX_ACQUIRED:
+		return "gnss fix acquired";
+	case MODEM_HL78XX_EVENT_GNSS_FIX_LOST:
+		return "gnss fix lost";
+	case MODEM_HL78XX_EVENT_GNSS_STOP_REQUESTED:
+		return "gnss stop requested";
+	case MODEM_HL78XX_EVENT_GNSS_STOPPED:
+		return "gnss stopped";
+	case MODEM_HL78XX_EVENT_GNSS_MODE_ENTER_REQUESTED:
+		return "gnss mode enter requested";
+	case MODEM_HL78XX_EVENT_GNSS_MODE_EXIT_REQUESTED:
+		return "gnss mode exit requested";
+#endif /* CONFIG_HL78XX_GNSS */
+#ifdef CONFIG_MODEM_HL78XX_AIRVANTAGE
+	case MODEM_HL78XX_EVENT_WDSI_UPDATE:
+		return "wdsi update";
+	case MODEM_HL78XX_EVENT_WDSI_RESTART:
+		return "wdsi restart";
+	case MODEM_HL78XX_EVENT_WDSI_DOWNLOAD_REQUEST:
+		return "wdsi download request";
+	case MODEM_HL78XX_EVENT_WDSI_DOWNLOAD_PROGRESS:
+		return "wdsi download progress";
+	case MODEM_HL78XX_EVENT_WDSI_DOWNLOAD_COMPLETE:
+		return "wdsi download complete";
+	case MODEM_HL78XX_EVENT_WDSI_INSTALL_REQUEST:
+		return "wdsi install request";
+	case MODEM_HL78XX_EVENT_WDSI_INSTALLING_FIRMWARE:
+		return "wdsi installing firmware";
+	case MODEM_HL78XX_EVENT_WDSI_FIRMWARE_INSTALL_SUCCEEDED:
+		return "wdsi firmware install succeeded";
+	case MODEM_HL78XX_EVENT_WDSI_FIRMWARE_INSTALL_FAILED:
+		return "wdsi firmware install failed";
+#endif /* CONFIG_MODEM_HL78XX_AIRVANTAGE */
+	case MODEM_HL78XX_EVENT_MDM_RESTART:
+		return "modem unexpected restart";
+	case MODEM_HL78XX_EVENT_AT_CMD_TIMEOUT:
+		return "AT command timeout";
 	default:
 		return "unknown event";
 	}
@@ -169,7 +227,7 @@ static void hl78xx_log_event(enum hl78xx_event evt)
 	LOG_DBG("event %s", hl78xx_event_str(evt));
 }
 
-static void hl78xx_start_timer(struct hl78xx_data *data, k_timeout_t timeout)
+void hl78xx_start_timer(struct hl78xx_data *data, k_timeout_t timeout)
 {
 	k_work_schedule(&data->timeout_work, timeout);
 }
@@ -354,12 +412,28 @@ void hl78xx_on_cxreg(struct modem_chat *chat, char **argv, uint16_t argc, void *
 void hl78xx_on_ksup(struct modem_chat *chat, char **argv, uint16_t argc, void *user_data)
 {
 	int module_status;
+	struct hl78xx_data *data = (struct hl78xx_data *)user_data;
 	struct hl78xx_evt event = {.type = HL78XX_LTE_MODEM_STARTUP};
 
 	if (argc != 2) {
 		return;
 	}
 	module_status = ATOI(argv[1], 0, "module_status");
+	data->status.boot.status = module_status;
+	/* Check for unexpected restart */
+	if (data->status.boot.is_booted_previously == true &&
+	    module_status == (int)HL78XX_MODULE_READY) {
+		LOG_DBG("Modem unexpected restart detected %d", module_status);
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_MDM_RESTART);
+	} else if (data->status.boot.is_booted_previously == true &&
+		   module_status != (int)HL78XX_MODULE_READY) {
+		LOG_DBG("Modem failed to start %d", module_status);
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_SUSPEND);
+	} else {
+		data->status.boot.is_booted_previously = true;
+		LOG_DBG("Modem started successfully %d %d", module_status,
+			data->status.boot.is_booted_previously);
+	}
 	event.content.value = module_status;
 	event_dispatcher_dispatch(&event);
 	HL78XX_LOG_DBG("Module status: %d", module_status);
@@ -435,6 +509,20 @@ void hl78xx_on_cgmr(struct modem_chat *chat, char **argv, uint16_t argc, void *u
 	k_mutex_unlock(&data->api_lock);
 }
 
+void hl78xx_on_serial_number(struct modem_chat *chat, char **argv, uint16_t argc, void *user_data)
+{
+	struct hl78xx_data *data = (struct hl78xx_data *)user_data;
+
+	if (argc != 2) {
+		return;
+	}
+	HL78XX_LOG_DBG("Serial Number: %s %s", argv[0], argv[1]);
+	k_mutex_lock(&data->api_lock, K_FOREVER);
+	safe_strncpy((char *)data->identity.serial_number, argv[1],
+		     sizeof(data->identity.serial_number));
+	k_mutex_unlock(&data->api_lock);
+}
+
 void hl78xx_on_iccid(struct modem_chat *chat, char **argv, uint16_t argc, void *user_data)
 {
 	struct hl78xx_data *data = (struct hl78xx_data *)user_data;
@@ -474,6 +562,27 @@ void hl78xx_on_kstatev(struct modem_chat *chat, char **argv, uint16_t argc, void
 		event_dispatcher_dispatch(&event);
 	}
 }
+
+void hl78xx_on_cgact(struct modem_chat *chat, char **argv, uint16_t argc, void *user_data)
+{
+	struct hl78xx_data *data = (struct hl78xx_data *)user_data;
+	int act_status = -1;
+	int cid = -1;
+
+	if (argc != 3) {
+		return;
+	}
+	cid = ATOI(argv[1], -1, "cid");
+	act_status = ATOI(argv[2], -1, "act_status");
+	if (cid == -1 || act_status == -1 || cid > CONFIG_MODEM_HL78XX_MAX_PDP_CONTEXTS) {
+		/* Invalid parameters */
+		return;
+	}
+
+	data->status.gprs[cid - 1].is_active = (act_status == 1) ? true : false;
+	data->status.gprs[cid - 1].cid = cid;
+	HL78XX_LOG_DBG("CGACT: %s %s", argv[0], argv[2]);
+}
 #endif
 
 void hl78xx_on_ksrep(struct modem_chat *chat, char **argv, uint16_t argc, void *user_data)
@@ -508,12 +617,12 @@ void hl78xx_on_kselacq(struct modem_chat *chat, char **argv, uint16_t argc, void
 		return;
 	}
 	if (argc > 3) {
-		data->kselacq_data.mode = 0;
+		data->kselacq_data.mode = false;
 		data->kselacq_data.rat1 = ATOI(argv[1], 0, "rat1");
 		data->kselacq_data.rat2 = ATOI(argv[2], 0, "rat2");
 		data->kselacq_data.rat3 = ATOI(argv[3], 0, "rat3");
 	} else {
-		data->kselacq_data.mode = 0;
+		data->kselacq_data.mode = false;
 		data->kselacq_data.rat1 = 0;
 		data->kselacq_data.rat2 = 0;
 		data->kselacq_data.rat3 = 0;
@@ -545,6 +654,31 @@ void hl78xx_on_kbndcfg(struct modem_chat *chat, char **argv, uint16_t argc, void
 	strncpy(data->status.kbndcfg[rat_id].bnd_bitmap, argv[2], kbnd_bitmap_size);
 	data->status.kbndcfg[rat_id].bnd_bitmap[kbnd_bitmap_size] = '\0';
 }
+#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
+
+void hl78xx_on_kntncfg(struct modem_chat *chat, char **argv, uint16_t argc, void *user_data)
+{
+	struct hl78xx_data *data = (struct hl78xx_data *)user_data;
+
+	if (argc < 2) {
+		return;
+	}
+	safe_strncpy((char *)data->status.ntn_rat.pos_mode, argv[1],
+		     sizeof(data->status.ntn_rat.pos_mode));
+	data->status.ntn_rat.is_dynamic = ATOI(argv[2], 0, "is_dynamic");
+}
+
+void hl78xx_on_kntn_posreq(struct modem_chat *chat, char **argv, uint16_t argc, void *user_data)
+{
+	struct hl78xx_data *data = (struct hl78xx_data *)user_data;
+
+	if (argc < 1) {
+		return;
+	}
+	hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_NTN_POSREQ);
+}
+
+#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
 
 void hl78xx_on_csq(struct modem_chat *chat, char **argv, uint16_t argc, void *user_data)
 {
@@ -576,6 +710,7 @@ void hl78xx_on_cfun(struct modem_chat *chat, char **argv, uint16_t argc, void *u
 	}
 	data->status.phone_functionality.functionality = ATOI(argv[1], 0, "phone_func");
 	data->status.phone_functionality.in_progress = false;
+	hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_PHONE_FUNCTIONALITY_CHANGED);
 }
 
 void hl78xx_on_cops(struct modem_chat *chat, char **argv, uint16_t argc, void *user_data)
@@ -590,6 +725,60 @@ void hl78xx_on_cops(struct modem_chat *chat, char **argv, uint16_t argc, void *u
 	data->status.network_operator.format = ATOI(argv[2], 0, "network_operator_format");
 }
 
+#ifdef CONFIG_MODEM_HL78XX_AIRVANTAGE
+
+void hl78xx_on_wdsi(struct modem_chat *chat, char **argv, uint16_t argc, void *user_data)
+{
+	struct hl78xx_data *data = (struct hl78xx_data *)user_data;
+	struct hl78xx_evt event = {.type = HL78XX_LTE_FOTA_UPDATE_STATUS};
+	int wsi_status = -1;
+	uint32_t wsi_data = 0;
+
+	if (argc < 2) {
+		return;
+	}
+	wsi_status = ATOI(argv[1], -1, "wdsi");
+	if (wsi_status == -1) {
+		return;
+	}
+	data->status.wdsi.level = wsi_status;
+	if (argc == 3) {
+		wsi_data = ATOI(argv[2], 0, "data");
+		data->status.wdsi.data = wsi_data;
+	}
+	if (data->status.wdsi.level == WDSI_FIRMWARE_AVAILABLE) {
+		data->status.wdsi.fota_size = wsi_data;
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_WDSI_UPDATE);
+	} else if (data->status.wdsi.level == WDSI_BOOTSTRAP_CREDENTIALS_PRESENT) {
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_WDSI_RESTART);
+	} else if (data->status.wdsi.level == WDSI_FIRMWARE_DOWNLOAD_REQUEST) {
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_WDSI_DOWNLOAD_REQUEST);
+	} else if (data->status.wdsi.level == WDSI_DOWNLOAD_IN_PROGRESS) {
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_WDSI_DOWNLOAD_PROGRESS);
+		data->status.wdsi.progress = wsi_data;
+	} else if (data->status.wdsi.level == WDSI_FIRMWARE_DOWNLOADED) {
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_WDSI_DOWNLOAD_COMPLETE);
+	} else if (data->status.wdsi.level == WDSI_FIRMWARE_INSTALL_REQUEST) {
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_WDSI_INSTALL_REQUEST);
+	} else if (data->status.wdsi.level == WDSI_FIRMWARE_UPDATE_START) {
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_WDSI_INSTALLING_FIRMWARE);
+	} else if (data->status.wdsi.level == WDSI_FIRMWARE_UPDATE_SUCCESS) {
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_WDSI_FIRMWARE_INSTALL_SUCCEEDED);
+	} else if (data->status.wdsi.level == WDSI_FIRMWARE_UPDATE_FAILED) {
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_WDSI_FIRMWARE_INSTALL_FAILED);
+	} else {
+		/* other WDSI levels during FOTA can be handled here if needed */
+	}
+	if ((data->status.wdsi.level == WDSI_DOWNLOAD_IN_PROGRESS &&
+	     (data->status.wdsi.progress == 0 || data->status.wdsi.progress == 100)) ||
+	    data->status.wdsi.level != WDSI_DOWNLOAD_IN_PROGRESS) {
+		event.content.wdsi_indication = data->status.wdsi.level;
+		event_dispatcher_dispatch(&event);
+	}
+	HL78XX_LOG_DBG("WDSI: %d %d", wsi_status, wsi_data);
+}
+
+#endif /* CONFIG_MODEM_HL78XX_AIRVANTAGE */
 /* -------------------------------------------------------------------------
  * Pipe & chat initialization
  * - modem backend pipe setup and chat initialisation helpers
@@ -634,13 +823,10 @@ static int modem_init_chat(const struct device *dev)
 }
 
 /* clang-format off */
-int modem_dynamic_cmd_send(
-			struct hl78xx_data *data,
-			modem_chat_script_callback script_user_callback,
-			const uint8_t *cmd, uint16_t cmd_size,
-			const struct modem_chat_match *response_matches, uint16_t matches_size,
-			bool user_cmd
-		)
+int modem_dynamic_cmd_send(struct hl78xx_data *data,
+			modem_chat_script_callback script_user_callback, const uint8_t *cmd,
+			uint16_t cmd_size, const struct modem_chat_match *response_matches,
+			uint16_t matches_size, uint16_t response_timeout, bool user_cmd)
 {
 	int ret = 0;
 	int script_ret = 0;
@@ -655,7 +841,7 @@ int modem_dynamic_cmd_send(
 		.request_size = cmd_size,
 		.response_matches = response_matches,
 		.response_matches_size = matches_size,
-		.timeout = 1000,
+		.timeout = 0, /* Has no effect */
 	};
 	struct modem_chat_script chat_script = {
 		.name = "dynamic_script",
@@ -664,7 +850,7 @@ int modem_dynamic_cmd_send(
 		.abort_matches = hl78xx_get_abort_matches(),
 		.abort_matches_size = hl78xx_get_abort_matches_size(),
 		.callback = script_user_callback,
-		.timeout = 1000
+		.timeout = response_timeout, /* overall script timeout */
 	};
 
 	ret = k_mutex_lock(&data->tx_lock, K_NO_WAIT);
@@ -676,6 +862,60 @@ int modem_dynamic_cmd_send(
 	}
 	/* run the chat script */
 	script_ret = modem_chat_run_script(&data->chat, &chat_script);
+	if (script_ret < 0) {
+		LOG_ERR("%d %s Failed to run at command: %d", __LINE__, __func__, script_ret);
+	} else {
+		LOG_DBG("Chat script executed successfully.");
+	}
+	ret = k_mutex_unlock(&data->tx_lock);
+	if (ret < 0) {
+		if (user_cmd == false) {
+			errno = -ret;
+		}
+		/* we still return the script result if available, prioritize script_ret */
+		return script_ret < 0 ? -1 : script_ret;
+	}
+	return script_ret;
+}
+
+int modem_dynamic_cmd_send_async(struct hl78xx_data *data,
+			modem_chat_script_callback script_user_callback, const uint8_t *cmd,
+			uint16_t cmd_size, const struct modem_chat_match *response_matches,
+			uint16_t matches_size, uint16_t response_timeout, bool user_cmd)
+{
+	int ret = 0;
+	int script_ret = 0;
+
+	if (data == NULL) {
+		LOG_ERR("%d %s Invalid parameter", __LINE__, __func__);
+		errno = EINVAL;
+		return -1;
+	}
+	ret = k_mutex_lock(&data->tx_lock, K_NO_WAIT);
+	if (ret < 0) {
+		if (user_cmd == false) {
+			errno = -ret;
+		}
+		return -1;
+	}
+	LOG_DBG("Executing async command: %.*s", cmd_size, cmd);
+	/* prepare the dynamic script */
+	data->buffers.cmd_len = snprintf(data->buffers.cmd_buffer, sizeof(data->buffers.cmd_buffer),
+				      "%.*s", cmd_size, cmd);
+	data->dynamic_chat.response_matches = response_matches;
+	data->dynamic_chat.response_matches_size = matches_size;
+	data->dynamic_chat.timeout = 0; /* Has no effect */
+	data->dynamic_script.name = "dynamic_script";
+	data->dynamic_script.script_chats = &data->dynamic_chat;
+	data->dynamic_script.script_chats_size = 1;
+	data->dynamic_script.abort_matches = hl78xx_get_abort_matches();
+	data->dynamic_script.abort_matches_size = hl78xx_get_abort_matches_size();
+	data->dynamic_script.callback = script_user_callback;
+	data->dynamic_script.timeout = response_timeout; /* overall script timeout */
+	data->dynamic_chat.request = data->buffers.cmd_buffer;
+	data->dynamic_chat.request_size = data->buffers.cmd_len;
+	/* run the chat script */
+	script_ret = modem_chat_run_script_async(&data->chat, &data->dynamic_script);
 	if (script_ret < 0) {
 		LOG_ERR("%d %s Failed to run at command: %d", __LINE__, __func__, script_ret);
 	} else {
@@ -876,7 +1116,107 @@ static void hl78xx_await_power_on_event_handler(struct hl78xx_data *data, enum h
 {
 	switch (evt) {
 	case MODEM_HL78XX_EVENT_TIMEOUT:
+		modem_pipe_attach(data->uart_pipe, hl78xx_bus_pipe_handler, data);
+		modem_pipe_open_async(data->uart_pipe);
+		break;
+
+	case MODEM_HL78XX_EVENT_SUSPEND:
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_IDLE);
+		break;
+
+	case MODEM_HL78XX_EVENT_BUS_OPENED:
+		modem_chat_attach(&data->chat, data->uart_pipe);
+#ifdef CONFIG_MODEM_HL78XX_AUTOBAUD_AT_BOOT
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_SET_BAUDRATE);
+#else
+		hl78xx_run_post_restart_script_async(data);
+#endif /* CONFIG_MODEM_HL78XX_AUTOBAUD_AT_BOOT */
+		break;
+
+	case MODEM_HL78XX_EVENT_SCRIPT_SUCCESS:
+		(void)hl78xx_get_uart_config(data);
+		LOG_DBG("Current baudrate after post-restart script: %d",
+			data->status.uart.current_baudrate);
+#if defined(CONFIG_MODEM_HL78XX_AUTOBAUD_ONLY_IF_COMMS_FAIL) ||                                    \
+	!defined(CONFIG_MODEM_HL78XX_AUTO_BAUDRATE)
+#ifdef CONFIG_MODEM_HL78XX_BOOT_IN_FULLY_FUNCTIONAL_MODE
 		hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_INIT_SCRIPT);
+#else
+		/* Leave the modem in airplane mode, the caller will enable it later */
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_AIRPLANE);
+#endif /* CONFIG_MODEM_HL78XX_BOOT_IN_FULLY_FUNCTIONAL_MODE */
+#else
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_SET_BAUDRATE);
+#endif /* CONFIG_MODEM_HL78XX_AUTOBAUD_ONLY_IF_COMMS_FAIL */
+		break;
+
+	case MODEM_HL78XX_EVENT_SCRIPT_FAILED:
+#ifdef CONFIG_MODEM_HL78XX_AUTO_BAUDRATE
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_SET_BAUDRATE);
+#else
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_INIT_FAIL_DIAGNOSTIC_SCRIPT);
+#endif /* CONFIG_MODEM_HL78XX_AUTO_BAUDRATE */
+	case MODEM_HL78XX_EVENT_AT_CMD_TIMEOUT:
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_INIT_FAIL_DIAGNOSTIC_SCRIPT);
+		break;
+
+	default:
+		break;
+	}
+}
+
+#ifdef CONFIG_MODEM_HL78XX_AUTO_BAUDRATE
+static int hl78xx_on_set_baudrate_state_enter(struct hl78xx_data *data)
+{
+	int ret;
+
+	data->status.uart.target_baudrate = CONFIG_MODEM_HL78XX_TARGET_BAUDRATE_VALUE;
+
+	/* Detect current baud rate */
+	ret = hl78xx_detect_current_baudrate(data);
+	if (ret < 0) {
+		LOG_ERR("Baud rate detection failed");
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_SCRIPT_FAILED);
+		return ret;
+	}
+
+	/* Switch to target baud rate if different */
+	ret = hl78xx_switch_baudrate(data, data->status.uart.target_baudrate);
+	if (ret < 0) {
+		LOG_ERR("Failed to switch baud rate: %d", ret);
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_SCRIPT_FAILED);
+		return ret;
+	}
+	data->status.boot.is_booted_previously = true;
+	hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_SCRIPT_SUCCESS);
+	return 0;
+}
+
+static void hl78xx_set_baudrate_event_handler(struct hl78xx_data *data, enum hl78xx_event evt)
+{
+	switch (evt) {
+	case MODEM_HL78XX_EVENT_SCRIPT_SUCCESS:
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_INIT_SCRIPT);
+		break;
+
+	case MODEM_HL78XX_EVENT_SCRIPT_FAILED:
+		/* Increment retry counter */
+		data->status.uart.baudrate_detection_retry++;
+
+		/* Retry detection or give up */
+		if (data->status.uart.baudrate_detection_retry <
+		    CONFIG_MODEM_HL78XX_AUTOBAUD_RETRY_COUNT) {
+			LOG_WRN("Retrying baud rate detection (attempt %d/%d)",
+				data->status.uart.baudrate_detection_retry + 1,
+				CONFIG_MODEM_HL78XX_AUTOBAUD_RETRY_COUNT);
+			k_sleep(K_MSEC(500));
+			hl78xx_on_set_baudrate_state_enter(data);
+		} else {
+			LOG_ERR("Baud rate configuration failed after %d attempts",
+				data->status.uart.baudrate_detection_retry);
+			hl78xx_enter_state(data,
+					   MODEM_HL78XX_STATE_RUN_INIT_FAIL_DIAGNOSTIC_SCRIPT);
+		}
 		break;
 
 	case MODEM_HL78XX_EVENT_SUSPEND:
@@ -887,21 +1227,16 @@ static void hl78xx_await_power_on_event_handler(struct hl78xx_data *data, enum h
 		break;
 	}
 }
+#endif /* CONFIG_MODEM_HL78XX_AUTO_BAUDRATE */
+
 static int hl78xx_on_run_init_script_state_enter(struct hl78xx_data *data)
 {
-	modem_pipe_attach(data->uart_pipe, hl78xx_bus_pipe_handler, data);
-	return modem_pipe_open_async(data->uart_pipe);
+	return hl78xx_run_init_script_async(data);
 }
 
 static void hl78xx_run_init_script_event_handler(struct hl78xx_data *data, enum hl78xx_event evt)
 {
 	switch (evt) {
-	case MODEM_HL78XX_EVENT_BUS_OPENED:
-		modem_chat_attach(&data->chat, data->uart_pipe);
-		/* Run init script via chat TU wrapper (script symbols live in hl78xx_chat.c) */
-		hl78xx_run_init_script_async(data);
-		break;
-
 	case MODEM_HL78XX_EVENT_SCRIPT_SUCCESS:
 		hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_RAT_CONFIG_SCRIPT);
 		break;
@@ -945,6 +1280,13 @@ static void hl78xx_run_init_fail_script_event_handler(struct hl78xx_data *data,
 		}
 		break;
 	case MODEM_HL78XX_EVENT_TIMEOUT:
+		LOG_ERR("Modem initialization failed after diagnostic script");
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_IDLE);
+		break;
+	case MODEM_HL78XX_EVENT_AT_CMD_TIMEOUT:
+#ifdef CONFIG_MODEM_HL78XX_AUTO_BAUDRATE
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_SET_BAUDRATE);
+#else
 		if (hl78xx_gpio_is_enabled(&config->mdm_gpio_pwr_on)) {
 			hl78xx_enter_state(data, MODEM_HL78XX_STATE_POWER_ON_PULSE);
 			break;
@@ -956,6 +1298,7 @@ static void hl78xx_run_init_fail_script_event_handler(struct hl78xx_data *data,
 		}
 
 		hl78xx_enter_state(data, MODEM_HL78XX_STATE_IDLE);
+#endif /* CONFIG_MODEM_HL78XX_AUTO_BAUDRATE */
 		break;
 	case MODEM_HL78XX_EVENT_BUS_CLOSED:
 		break;
@@ -966,9 +1309,9 @@ static void hl78xx_run_init_fail_script_event_handler(struct hl78xx_data *data,
 
 	case MODEM_HL78XX_EVENT_SCRIPT_FAILED:
 		if (!hl78xx_gpio_is_enabled(&config->mdm_gpio_wake)) {
-			LOG_ERR("modem wake pin is not enabled, make sure modem low power is "
-				"disabled, if you are not sure enable wake up pin by adding it "
-				"dts!!");
+			LOG_ERR("The modem wake pin is not enabled. Make sure that modem low-power "
+				"mode is disabled. If you’re unsure, enable it by adding the "
+				"corresponding DTS configuration entry.");
 		}
 
 		if (data->status.script_fail_counter++ < MAX_SCRIPT_AT_CMD_RETRY) {
@@ -1006,9 +1349,19 @@ static int hl78xx_on_rat_cfg_script_state_enter(struct hl78xx_data *data)
 		goto error;
 	}
 
+#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
+
+	ret = hl78xx_rat_ntn_cfg(data, &modem_require_restart, rat_config_request);
+	if (ret < 0) {
+		goto error;
+	}
+
+#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
 	if (modem_require_restart) {
+		HL78XX_LOG_DBG("Modem restart required to apply new RAT/Band settings");
 		ret = modem_dynamic_cmd_send(data, NULL, cmd_restart, strlen(cmd_restart),
-					     hl78xx_get_ok_match(), 1, false);
+					     hl78xx_get_ok_match(), hl78xx_get_ok_match_size(),
+					     MDM_CMD_TIMEOUT, false);
 		if (ret < 0) {
 			goto error;
 		}
@@ -1026,17 +1379,19 @@ error:
 
 static void hl78xx_run_rat_cfg_script_event_handler(struct hl78xx_data *data, enum hl78xx_event evt)
 {
-	int ret = 0;
-
 	switch (evt) {
 	case MODEM_HL78XX_EVENT_TIMEOUT:
-		LOG_DBG("Rebooting modem to apply new RAT settings");
-		ret = hl78xx_run_post_restart_script_async(data);
-		if (ret < 0) {
-			hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_SUSPEND);
+#ifdef CONFIG_MODEM_HL78XX_AUTO_BAUDRATE
+		if (IS_ENABLED(CONFIG_MODEM_HL78XX_AUTOBAUD_CHANGE_PERSISTENT) == false) {
+			hl78xx_enter_state(data, MODEM_HL78XX_STATE_SET_BAUDRATE);
 		}
 		break;
-
+#endif /* CONFIG_MODEM_HL78XX_AUTO_BAUDRATE */
+		LOG_DBG("Rebooting modem to apply new RAT settings");
+		break;
+	case MODEM_HL78XX_EVENT_MDM_RESTART:
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_INIT_SCRIPT);
+		break;
 	case MODEM_HL78XX_EVENT_SCRIPT_SUCCESS:
 		hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_ENABLE_GPRS_SCRIPT);
 		break;
@@ -1096,12 +1451,10 @@ static int hl78xx_on_enable_gprs_state_enter(struct hl78xx_data *data)
 	if (ret) {
 		goto error;
 	}
-#if defined(CONFIG_MODEM_HL78XX_BOOT_IN_FULLY_FUNCTIONAL_MODE)
 	ret = hl78xx_api_func_set_phone_functionality(data->dev, HL78XX_FULLY_FUNCTIONAL, false);
 	if (ret) {
 		goto error;
 	}
-#endif /* CONFIG_MODEM_HL78XX_BOOT_IN_FULLY_FUNCTIONAL_MODE */
 	hl78xx_chat_callback_handler(&data->chat, MODEM_CHAT_SCRIPT_RESULT_SUCCESS, data);
 	return 0;
 error:
@@ -1115,7 +1468,7 @@ static void hl78xx_enable_gprs_event_handler(struct hl78xx_data *data, enum hl78
 	switch (evt) {
 	case MODEM_HL78XX_EVENT_SCRIPT_SUCCESS:
 	case MODEM_HL78XX_EVENT_SCRIPT_FAILED:
-		hl78xx_start_timer(data, MODEM_HL78XX_PERIODIC_SCRIPT_TIMEOUT);
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_AWAIT_REGISTERED);
 		break;
 
 	case MODEM_HL78XX_EVENT_TIMEOUT:
@@ -1168,6 +1521,11 @@ static void hl78xx_await_registered_event_handler(struct hl78xx_data *data, enum
 
 		break;
 
+	case MODEM_HL78XX_EVENT_MDM_RESTART:
+		LOG_DBG("Modem restart detected %d", __LINE__);
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_INIT_SCRIPT);
+		break;
+
 	case MODEM_HL78XX_EVENT_REGISTERED:
 		hl78xx_enter_state(data, MODEM_HL78XX_STATE_CARRIER_ON);
 		break;
@@ -1175,7 +1533,13 @@ static void hl78xx_await_registered_event_handler(struct hl78xx_data *data, enum
 	case MODEM_HL78XX_EVENT_SUSPEND:
 		hl78xx_enter_state(data, MODEM_HL78XX_STATE_INIT_POWER_OFF);
 		break;
-
+#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
+#ifdef CONFIG_NTN_POSITION_SOURCE_MANUAL
+	case MODEM_HL78XX_EVENT_NTN_POSREQ:
+		hl78xx_run_ntn_pos_script_async(data);
+		break;
+#endif /* CONFIG_NTN_POSITION_SOURCE_MANUAL */
+#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
 	default:
 		break;
 	}
@@ -1189,6 +1553,25 @@ static int hl78xx_on_await_registered_state_leave(struct hl78xx_data *data)
 
 static int hl78xx_on_carrier_on_state_enter(struct hl78xx_data *data)
 {
+#ifdef CONFIG_HL78XX_GNSS
+	/* Check and process any pending GNSS mode entry request */
+	if (hl78xx_gnss_check_and_clear_pending(data)) {
+		LOG_INF("Processing pending GNSS mode request (queued before modem ready)");
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_GNSS_INIT_SCRIPT);
+		return 0;
+	}
+#endif /* CONFIG_HL78XX_GNSS */
+
+#ifdef CONFIG_MODEM_HL78XX_RAT_GSM
+	int ret = 0;
+	/* Activate the PDP context */
+	ret = hl78xx_gsm_pdp_activate(data);
+	if (ret) {
+		LOG_ERR("Failed to activate PDP context: %d", ret);
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_SCRIPT_FAILED);
+		return ret;
+	}
+#endif /* CONFIG_MODEM_HL78XX_RAT_GSM */
 	notif_carrier_on(data->dev);
 	iface_status_work_cb(data, hl78xx_chat_callback_handler);
 	return 0;
@@ -1196,25 +1579,78 @@ static int hl78xx_on_carrier_on_state_enter(struct hl78xx_data *data)
 
 static void hl78xx_carrier_on_event_handler(struct hl78xx_data *data, enum hl78xx_event evt)
 {
+	int ret = 0;
+
 	switch (evt) {
 	case MODEM_HL78XX_EVENT_SCRIPT_SUCCESS:
 		hl78xx_start_timer(data, K_SECONDS(2));
 
 		break;
 	case MODEM_HL78XX_EVENT_SCRIPT_FAILED:
+		/* TODO: Handle script failure */
 		break;
 
 	case MODEM_HL78XX_EVENT_TIMEOUT:
-		dns_work_cb(data->dev, true);
+		ret = dns_work_cb(data->dev, true);
+		if (ret == -EAGAIN) {
+			LOG_ERR("DNS work callback failed: rescheduling... %d", ret);
+			hl78xx_start_timer(data, K_SECONDS(2));
+			break;
+		}
+		if (ret < 0) {
+			LOG_ERR("DNS work callback failed: %d", ret);
+		}
 		break;
 
 	case MODEM_HL78XX_EVENT_DEREGISTERED:
-		hl78xx_enter_state(data, MODEM_HL78XX_STATE_AWAIT_REGISTERED);
+		if (data->status.phone_functionality.functionality != HL78XX_AIRPLANE &&
+		    data->status.phone_functionality.in_progress == false) {
+			hl78xx_enter_state(data, MODEM_HL78XX_STATE_AWAIT_REGISTERED);
+		}
 		break;
 
 	case MODEM_HL78XX_EVENT_SUSPEND:
 		hl78xx_enter_state(data, MODEM_HL78XX_STATE_INIT_POWER_OFF);
 		break;
+
+	case MODEM_HL78XX_EVENT_MDM_RESTART:
+		LOG_DBG("Modem restart detected %d", __LINE__);
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_INIT_SCRIPT);
+		break;
+
+	case MODEM_HL78XX_EVENT_PHONE_FUNCTIONALITY_CHANGED:
+		LOG_DBG("Phone functionality changed to %d in CARRIER_ON state",
+			data->status.phone_functionality.functionality);
+		/*
+		 * If user manually sets airplane mode (not through hl78xx_enter_gnss_mode),
+		 * we don't automatically enter GNSS mode. User must explicitly request it.
+		 */
+		if (data->status.phone_functionality.functionality == HL78XX_AIRPLANE) {
+			hl78xx_enter_state(data, MODEM_HL78XX_STATE_AIRPLANE);
+		}
+		break;
+
+#ifdef CONFIG_MODEM_HL78XX_AIRVANTAGE
+	case MODEM_HL78XX_EVENT_WDSI_UPDATE:
+	case MODEM_HL78XX_EVENT_WDSI_DOWNLOAD_REQUEST:
+	case MODEM_HL78XX_EVENT_WDSI_DOWNLOAD_PROGRESS:
+	case MODEM_HL78XX_EVENT_WDSI_INSTALL_REQUEST:
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_FOTA);
+		data->status.wdsi.in_progress = true;
+		break;
+#endif /* CONFIG_MODEM_HL78XX_AIRVANTAGE */
+
+#ifdef CONFIG_HL78XX_GNSS
+	case MODEM_HL78XX_EVENT_GNSS_MODE_ENTER_REQUESTED:
+		/*
+		 * GNSS mode requested from connected LTE state.
+		 * First go through carrier_off to properly notify app and close sockets,
+		 * then transition to airplane mode before starting GNSS.
+		 */
+		LOG_INF("GNSS mode requested - transitioning to carrier_off first");
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_CARRIER_OFF);
+		break;
+#endif /* CONFIG_HL78XX_GNSS */
 
 	default:
 		break;
@@ -1227,6 +1663,120 @@ static int hl78xx_on_carrier_on_state_leave(struct hl78xx_data *data)
 	return 0;
 }
 
+#ifdef CONFIG_MODEM_HL78XX_AIRVANTAGE
+
+static int hl78xx_on_fota_state_enter(struct hl78xx_data *data)
+{
+	HL78XX_LOG_DBG("Entering FOTA state");
+	hl78xx_start_timer(data, K_MSEC(100));
+	/* Decide best time to start FOTA */
+	return 0;
+}
+
+static void hl78xx_fota_event_handler(struct hl78xx_data *data, enum hl78xx_event evt)
+{
+	switch (evt) {
+	case MODEM_HL78XX_EVENT_TIMEOUT:
+		/* Start FOTA process */
+		if (data->status.wdsi.in_progress == true) {
+			if (data->status.wdsi.level == WDSI_FIRMWARE_DOWNLOAD_REQUEST &&
+			    data->status.wdsi.fota_state != HL78XX_WDSI_FOTA_DOWNLOADING) {
+				LOG_INF("FOTA available, notifying modem...");
+				hl78xx_delegate_event(data,
+						      MODEM_HL78XX_EVENT_WDSI_DOWNLOAD_REQUEST);
+			} else if (data->status.wdsi.level == WDSI_FIRMWARE_INSTALL_REQUEST &&
+				   data->status.wdsi.fota_state != HL78XX_WDSI_FOTA_INSTALLING) {
+				LOG_INF("FOTA downloaded, notifying modem...");
+				hl78xx_delegate_event(data,
+						      MODEM_HL78XX_EVENT_WDSI_INSTALL_REQUEST);
+			} else {
+				HL78XX_LOG_DBG("FOTA in progress, notifying modem...");
+				hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_WDSI_UPDATE);
+			}
+		}
+		break;
+	case MODEM_HL78XX_EVENT_SCRIPT_SUCCESS:
+		HL78XX_LOG_DBG("FOTA script completed successfully.");
+		break;
+	case MODEM_HL78XX_EVENT_WDSI_UPDATE:
+		if (data->status.wdsi.level == WDSI_DM_SESSION_CLOSED) {
+			LOG_INF("FOTA DM session closed.");
+			if (data->status.wdsi.in_progress == true) {
+				LOG_INF("FOTA update process completed, rebooting modem...");
+			} else {
+				LOG_INF("FOTA update process not started, returning to "
+					"carrier on state...");
+			}
+			break;
+		}
+		break;
+	case MODEM_HL78XX_EVENT_WDSI_RESTART:
+		LOG_INF("FOTA modem restart occurred...%d", data->status.boot.is_booted_previously);
+		break;
+	case MODEM_HL78XX_EVENT_WDSI_DOWNLOAD_REQUEST:
+		if (data->status.wdsi.fota_state == HL78XX_WDSI_FOTA_DOWNLOADING) {
+			return;
+		}
+		LOG_INF("FOTA download requested File size %d bytes, starting download...",
+			data->status.wdsi.fota_size);
+		data->status.wdsi.fota_state = HL78XX_WDSI_FOTA_DOWNLOADING;
+		hl78xx_run_fota_script_download_accept_async(data);
+		break;
+	case MODEM_HL78XX_EVENT_WDSI_DOWNLOAD_PROGRESS:
+		LOG_INF("FOTA update in progress, completion... %d%%", data->status.wdsi.progress);
+		break;
+	case MODEM_HL78XX_EVENT_WDSI_DOWNLOAD_COMPLETE:
+		LOG_INF("FOTA download completed...");
+		data->status.wdsi.fota_state = HL78XX_WDSI_FOTA_DOWNLOAD_COMPLETED;
+		break;
+	case MODEM_HL78XX_EVENT_WDSI_INSTALL_REQUEST:
+		LOG_INF("FOTA install request received...");
+		data->status.wdsi.fota_state = HL78XX_WDSI_FOTA_INSTALLING;
+		hl78xx_run_fota_script_install_accept_async(data);
+		break;
+	case MODEM_HL78XX_EVENT_WDSI_INSTALLING_FIRMWARE:
+		LOG_INF("Install accepted, FOTA update installing...");
+		LOG_INF("This may take several minutes, please wait...");
+		LOG_INF("Do not power off the modem!!!");
+		break;
+	case MODEM_HL78XX_EVENT_WDSI_FIRMWARE_INSTALL_SUCCEEDED:
+		LOG_INF("FOTA firmware install succeeded...Waiting for modem +KSUP");
+		data->status.wdsi.fota_state = HL78XX_WDSI_FOTA_INSTALL_COMPLETED;
+		data->status.wdsi.in_progress = false;
+		data->status.wdsi.progress = 0;
+		break;
+	case MODEM_HL78XX_EVENT_WDSI_FIRMWARE_INSTALL_FAILED:
+		LOG_INF("FOTA firmware install failed...");
+		data->status.wdsi.in_progress = false;
+		data->status.wdsi.progress = 0;
+		/* TODO: fail, do something */
+		break;
+	case MODEM_HL78XX_EVENT_MDM_RESTART:
+		if (data->status.wdsi.in_progress == true) {
+			/* FOTA update in progress, waiting for it to complete */
+			data->status.wdsi.fota_state = HL78XX_WDSI_FOTA_IDLE;
+		} else {
+			LOG_INF("Exiting FOTA state, re-initializing modem...");
+			hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_INIT_SCRIPT);
+		}
+		break;
+	case MODEM_HL78XX_EVENT_REGISTERED:
+		/* stay in FOTA state */
+		hl78xx_start_timer(data, K_MSEC(100));
+		break;
+	default:
+		break;
+	}
+}
+
+static int hl78xx_on_fota_state_leave(struct hl78xx_data *data)
+{
+	HL78XX_LOG_DBG("Exiting FOTA state");
+	hl78xx_stop_timer(data);
+	return 0;
+}
+
+#endif /* CONFIG_MODEM_HL78XX_AIRVANTAGE */
 static int hl78xx_on_carrier_off_state_enter(struct hl78xx_data *data)
 {
 	notif_carrier_off(data->dev);
@@ -1248,6 +1798,21 @@ static void hl78xx_carrier_off_event_handler(struct hl78xx_data *data, enum hl78
 	case MODEM_HL78XX_EVENT_SCRIPT_SUCCESS:
 	case MODEM_HL78XX_EVENT_SCRIPT_FAILED:
 	case MODEM_HL78XX_EVENT_TIMEOUT:
+#ifdef CONFIG_HL78XX_GNSS
+		/*
+		 * Check if GNSS mode entry is pending - if so, transition to airplane mode
+		 * instead of returning to GPRS/LTE
+		 */
+		if (hl78xx_gnss_is_pending(data)) {
+			LOG_INF("Carrier off complete, transitioning to airplane mode for GNSS");
+			modem_dynamic_cmd_send(data, NULL, GET_FULLFUNCTIONAL_MODE_CMD,
+					       strlen(GET_FULLFUNCTIONAL_MODE_CMD),
+					       hl78xx_get_ok_match(), hl78xx_get_ok_match_size(),
+					       MDM_CMD_TIMEOUT, false);
+			hl78xx_enter_state(data, MODEM_HL78XX_STATE_AIRPLANE);
+			break;
+		}
+#endif /* CONFIG_HL78XX_GNSS */
 		hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_ENABLE_GPRS_SCRIPT);
 		break;
 
@@ -1270,6 +1835,59 @@ static int hl78xx_on_carrier_off_state_leave(struct hl78xx_data *data)
 	return 0;
 }
 
+static int hl78xx_on_airplane_mode_state_enter(struct hl78xx_data *data)
+{
+	if (data->status.phone_functionality.functionality == HL78XX_AIRPLANE) {
+		/* Already in airplane mode */
+		hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_SCRIPT_SUCCESS);
+		return 0;
+	}
+	HL78XX_LOG_DBG("Setting airplane mode (CFUN=4)...");
+	hl78xx_api_func_set_phone_functionality(data->dev, HL78XX_AIRPLANE, false);
+
+	return hl78xx_run_cfun_query_script_async(data);
+}
+
+static void hl78xx_airplane_mode_event_handler(struct hl78xx_data *data, enum hl78xx_event evt)
+{
+	switch (evt) {
+	case MODEM_HL78XX_EVENT_SCRIPT_SUCCESS:
+#ifdef CONFIG_HL78XX_GNSS
+		/* Check and process any pending GNSS mode entry request */
+		if (hl78xx_gnss_check_and_clear_pending(data)) {
+			LOG_INF("Processing pending GNSS mode request");
+			hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_GNSS_INIT_SCRIPT);
+			break;
+		}
+#endif /* CONFIG_HL78XX_GNSS */
+		break;
+
+#ifdef CONFIG_HL78XX_GNSS
+	case MODEM_HL78XX_EVENT_GNSS_MODE_ENTER_REQUESTED:
+		/* User explicitly requested GNSS mode while in airplane state */
+		LOG_INF("GNSS mode requested - transitioning to GNSS init state");
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_GNSS_INIT_SCRIPT);
+		break;
+#endif /* CONFIG_HL78XX_GNSS */
+
+	case MODEM_HL78XX_EVENT_SCRIPT_FAILED:
+		LOG_ERR("Failed to set airplane mode");
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_IDLE);
+		break;
+
+	case MODEM_HL78XX_EVENT_SUSPEND:
+		hl78xx_enter_state(data, MODEM_HL78XX_STATE_INIT_POWER_OFF);
+		break;
+
+	default:
+		break;
+	}
+}
+
+static int hl78xx_on_airplane_mode_state_leave(struct hl78xx_data *data)
+{
+	return 0;
+}
 /* pwroff script moved to hl78xx_chat.c */
 static int hl78xx_on_init_power_off_state_enter(struct hl78xx_data *data)
 {
@@ -1464,14 +2082,12 @@ static void hl78xx_event_handler(struct hl78xx_data *data, enum hl78xx_event evt
 	if ((int)s <= MODEM_HL78XX_STATE_AWAIT_POWER_OFF && hl78xx_state_table[s].on_event) {
 		hl78xx_state_table[s].on_event(data, evt);
 	} else {
-		LOG_ERR("%d %s unknown event", __LINE__, __func__);
+		LOG_ERR("%d unknown event %d", __LINE__, evt);
 	}
 	if (state != s) {
 		hl78xx_log_state_changed(state, s);
 	}
 }
-
-#ifdef CONFIG_PM_DEVICE
 
 /* -------------------------------------------------------------------------
  * Power management
@@ -1515,7 +2131,6 @@ static int hl78xx_driver_pm_action(const struct device *dev, enum pm_device_acti
 	}
 	return ret;
 }
-#endif /* CONFIG_PM_DEVICE */
 
 /* -------------------------------------------------------------------------
  * Initialization
@@ -1547,6 +2162,15 @@ static int hl78xx_init(const struct device *dev)
 	data->buffers.eof_pattern_size = strlen(data->buffers.eof_pattern);
 	data->buffers.termination_pattern_size = strlen(data->buffers.termination_pattern);
 	memset(data->identity.apn, 0, MDM_APN_MAX_LENGTH);
+#ifdef CONFIG_MODEM_HL78XX_AUTO_BAUDRATE
+	data->status.uart.current_baudrate = 0;
+	data->status.uart.target_baudrate = CONFIG_MODEM_HL78XX_TARGET_BAUDRATE_VALUE;
+	data->status.uart.baudrate_detection_retry = 0;
+#ifdef CONFIG_MODEM_HL78XX_AUTOBAUD_START_WITH_TARGET_BAUDRATE
+	/* Update baud rate */
+	configure_uart_for_auto_baudrate(data, data->status.uart.target_baudrate);
+#endif /* CONFIG_MODEM_HL78XX_AUTOBAUD_START_WITH_TARGET_BAUDRATE */
+#endif /* CONFIG_MODEM_HL78XX_AUTO_BAUDRATE */
 	/* GPIO validation */
 	const struct gpio_dt_spec *gpio_pins[GPIO_CONFIG_LEN] = {
 #if HAS_RESET_GPIO
@@ -1682,16 +2306,13 @@ static int hl78xx_init(const struct device *dev)
 		goto error;
 	}
 
-#ifndef CONFIG_PM_DEVICE
-	hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_RESUME);
-#else
-	pm_device_init_suspended(dev);
-#endif /* CONFIG_PM_DEVICE */
-
 #ifdef CONFIG_MODEM_HL78XX_STAY_IN_BOOT_MODE_FOR_ROAMING
 	k_sem_take(&data->stay_in_boot_mode_sem, K_FOREVER);
 #endif
-	return 0;
+	LOG_INF("Modem HL78xx initialized");
+	/* Register the power management handler */
+	return pm_device_driver_init(dev, hl78xx_driver_pm_action);
+
 error:
 	return ret;
 }
@@ -1730,11 +2351,13 @@ const static struct hl78xx_state_handlers hl78xx_state_table[] = {
 		NULL,
 		hl78xx_await_power_on_event_handler
 	},
+#ifdef CONFIG_MODEM_HL78XX_AUTO_BAUDRATE
 	[MODEM_HL78XX_STATE_SET_BAUDRATE] = {
+		hl78xx_on_set_baudrate_state_enter,
 		NULL,
-		NULL,
-		NULL
+		hl78xx_set_baudrate_event_handler
 	},
+#endif /* CONFIG_MODEM_HL78XX_AUTO_BAUDRATE */
 	[MODEM_HL78XX_STATE_RUN_INIT_SCRIPT] = {
 		hl78xx_on_run_init_script_state_enter,
 		NULL,
@@ -1765,20 +2388,39 @@ const static struct hl78xx_state_handlers hl78xx_state_table[] = {
 		hl78xx_on_carrier_on_state_leave,
 		hl78xx_carrier_on_event_handler
 	},
+#ifdef CONFIG_MODEM_HL78XX_AIRVANTAGE
+	[MODEM_HL78XX_STATE_FOTA] = {
+		hl78xx_on_fota_state_enter,
+		hl78xx_on_fota_state_leave,
+		hl78xx_fota_event_handler
+	},
+#endif /* CONFIG_MODEM_HL78XX_AIRVANTAGE */
 	[MODEM_HL78XX_STATE_CARRIER_OFF] = {
 		hl78xx_on_carrier_off_state_enter,
 		hl78xx_on_carrier_off_state_leave,
 		hl78xx_carrier_off_event_handler
 	},
+#ifdef CONFIG_HL78XX_GNSS
+	[MODEM_HL78XX_STATE_RUN_GNSS_INIT_SCRIPT] = {
+		hl78xx_on_run_gnss_init_script_state_enter,
+		hl78xx_on_run_gnss_init_script_state_leave,
+		hl78xx_run_gnss_init_script_event_handler
+	},
+	[MODEM_HL78XX_STATE_GNSS_SEARCH_STARTED] = {
+		hl78xx_on_gnss_search_started_state_enter,
+		hl78xx_on_gnss_search_started_state_leave,
+		hl78xx_gnss_search_started_event_handler
+	},
+#endif /* CONFIG_HL78XX_GNSS */
 	[MODEM_HL78XX_STATE_SIM_POWER_OFF] = {
 		NULL,
 		NULL,
 		NULL
 	},
 	[MODEM_HL78XX_STATE_AIRPLANE] = {
-		NULL,
-		NULL,
-		NULL
+		hl78xx_on_airplane_mode_state_enter,
+		hl78xx_on_airplane_mode_state_leave,
+		hl78xx_airplane_mode_event_handler
 	},
 	[MODEM_HL78XX_STATE_INIT_POWER_OFF] = {
 		hl78xx_on_init_power_off_state_enter,
@@ -1845,10 +2487,10 @@ static DEVICE_API(cellular, hl78xx_api) = {
 			      CONFIG_MODEM_HL78XX_DEV_INIT_PRIORITY, &hl78xx_api);
 
 #define MODEM_DEVICE_SWIR_HL78XX(inst)                                                             \
-	MODEM_HL78XX_DEFINE_INSTANCE(inst, CONFIG_MODEM_HL78XX_DEV_POWER_PULSE_DURATION,           \
-				     CONFIG_MODEM_HL78XX_DEV_RESET_PULSE_DURATION,                 \
-				     CONFIG_MODEM_HL78XX_DEV_STARTUP_TIME,                         \
-				     CONFIG_MODEM_HL78XX_DEV_SHUTDOWN_TIME, false, NULL, NULL)
+	MODEM_HL78XX_DEFINE_INSTANCE(inst, CONFIG_MODEM_HL78XX_DEV_POWER_PULSE_DURATION_MS,        \
+				     CONFIG_MODEM_HL78XX_DEV_RESET_PULSE_DURATION_MS,              \
+				     CONFIG_MODEM_HL78XX_DEV_STARTUP_TIME_MS,                      \
+				     CONFIG_MODEM_HL78XX_DEV_SHUTDOWN_TIME_MS, false, NULL, NULL)
 
 #define DT_DRV_COMPAT swir_hl7812
 DT_INST_FOREACH_STATUS_OKAY(MODEM_DEVICE_SWIR_HL78XX)
