@@ -31,8 +31,10 @@ LOG_MODULE_REGISTER(flash_infineon, CONFIG_FLASH_LOG_LEVEL);
 
 extern cy_stc_smif_block_config_t smif0BlockConfig;
 static mtb_serial_memory_t serial_memory_obj;
+#ifndef CONFIG_XIP
 static cy_stc_smif_mem_context_t smif_mem_context;
 static cy_stc_smif_mem_info_t smif_mem_info;
+#endif /* !CONFIG_XIP */
 
 #ifdef CONFIG_PM
 #ifdef CONFIG_SOC_SERIES_PSE84
@@ -243,8 +245,23 @@ static int ifx_serial_memory_flash_init(const struct device *dev)
 {
 	struct ifx_serial_memory_flash_data *data = dev->data;
 
-	cy_rslt_t result;
+	cy_rslt_t result = CY_RSLT_SUCCESS;
 
+#ifdef CONFIG_FLASH_INFINEON_SMIF_HW_INIT
+	int ret = ifx_serial_memory_hw_init();
+
+	if (ret) {
+		LOG_ERR("SMIF HW init failed: %d", ret);
+		return ret;
+	}
+#endif
+
+	/*
+	 * When CONFIG_XIP is enabled the bootloader has already configured the SMIF
+	 * peripheral to execute code from the external QSPI flash. Re-running setup
+	 * here would reconfigure a live XIP interface and crash execution.
+	 */
+#ifndef CONFIG_XIP
 	/* Set-up serial memory. */
 	result = mtb_serial_memory_setup(&serial_memory_obj, MTB_SERIAL_MEMORY_CHIP_SELECT_1,
 					 SMIF0_CORE0, &CYBSP_SMIF_CORE_0_XSPI_FLASH_hal_clock,
@@ -252,6 +269,7 @@ static int ifx_serial_memory_flash_init(const struct device *dev)
 	if (result != CY_RSLT_SUCCESS) {
 		LOG_ERR("serial memory setup failed (QSPI) : 0x%x", result);
 	}
+#endif /* !CONFIG_XIP */
 
 	k_sem_init(&data->sem, 1, 1);
 
