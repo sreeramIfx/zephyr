@@ -245,8 +245,6 @@ static int ifx_serial_memory_flash_init(const struct device *dev)
 {
 	struct ifx_serial_memory_flash_data *data = dev->data;
 
-	cy_rslt_t result = CY_RSLT_SUCCESS;
-
 #ifdef CONFIG_FLASH_INFINEON_SMIF_HW_INIT
 	int ret = ifx_serial_memory_hw_init();
 
@@ -263,11 +261,13 @@ static int ifx_serial_memory_flash_init(const struct device *dev)
 	 */
 #ifndef CONFIG_XIP
 	/* Set-up serial memory. */
-	result = mtb_serial_memory_setup(&serial_memory_obj, MTB_SERIAL_MEMORY_CHIP_SELECT_1,
-					 SMIF0_CORE0, &CYBSP_SMIF_CORE_0_XSPI_FLASH_hal_clock,
-					 &smif_mem_context, &smif_mem_info, &smif0BlockConfig);
+	cy_rslt_t result = mtb_serial_memory_setup(
+		&serial_memory_obj, MTB_SERIAL_MEMORY_CHIP_SELECT_1, IFX_SERIAL_MEMORY_SMIF,
+		&CYBSP_SMIF_CORE_0_XSPI_FLASH_hal_clock, &smif_mem_context, &smif_mem_info,
+		&smif0BlockConfig);
 	if (result != CY_RSLT_SUCCESS) {
 		LOG_ERR("serial memory setup failed (QSPI) : 0x%x", result);
+		return -EIO;
 	}
 #endif /* !CONFIG_XIP */
 
@@ -277,7 +277,7 @@ static int ifx_serial_memory_flash_init(const struct device *dev)
 	Cy_SysPm_RegisterCallback(&flash_deep_sleep);
 #endif /* CONFIG_PM */
 
-	return result;
+	return 0;
 }
 
 static DEVICE_API(flash, ifx_serial_memory_flash_driver_api) = {
