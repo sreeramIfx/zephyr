@@ -336,6 +336,13 @@ static int ifx_serial_memory_flash_init(const struct device *dev)
 	Cy_SMIF_SetMode(IFX_SERIAL_MEMORY_SMIF, CY_SMIF_MEMORY);
 #endif
 
+#if defined(CONFIG_MCUBOOT)
+	/* Enable XIP/memory-mapped mode so apps can execute from external flash
+	 * after MCUboot jumps to them.
+	 */
+	Cy_SMIF_SetMode(IFX_SERIAL_MEMORY_SMIF, CY_SMIF_MEMORY);
+#endif
+
 	k_sem_init(&data->sem, 1, 1);
 
 #ifdef CONFIG_PM
